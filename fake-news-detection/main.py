@@ -41,8 +41,9 @@ data.drop(["index"], axis=1, inplace=True)
 
 sns.countplot(data=data, x="class", order=data["class"].value_counts().index)
 
-nltk.download("punkt")
-nltk.download("stopwords")
+# nltk.download("wordnet")
+# nltk.download("punkt")
+# nltk.download("stopwords")
 
 
 def preprocess_text(text_data):
