@@ -173,3 +173,7 @@ cython_debug/
 
 # datasets
 *.csv
+
+# saved data with joblib
+data.pkl
+*.pkl
