@@ -257,68 +257,107 @@ class OCRTranslatorApp:
 
     def process_image(self, img_path):
         try:
-            # ۱. بارگذاری تصویر اصلی (هم PIL هم OpenCV)
+            # ۱. بارگذاری تصاویر
             img_pil_original, img_cv_original = self._load_images_from_path(img_path)
 
-            # ۲. ایجاد یک کپی از تصویر OpenCV برای پیش‌پردازش
+            # ۲. ایجاد کپی و پیش‌پردازش تصویر برای OCR
             img_cv_for_preprocessing = img_cv_original.copy()
-
-            # ۳. پیش‌پردازش تصویر برای OCR
             preprocessed_cv_image = self._preprocess_image_for_ocr(img_cv_for_preprocessing)
 
-            if preprocessed_cv_image is None:
-                # print("DEBUG: Preprocessing failed, using original image for OCR.")
-                # اگر پیش‌پردازش ناموفق بود، می‌توانیم از تصویر اصلی برای OCR استفاده کنیم یا خطا دهیم
-                # فعلا از تصویر اصلی PIL استفاده می‌کنیم (بدون پیش‌پردازش)
-                # یا می‌توانید در اینجا خطا ایجاد کنید و ادامه ندهید
-                df_ocr_processed = self._get_structured_ocr_data(img_cv_original, psm_config='--psm 1') # یا img_pil_original
+            psm_to_use = '--psm 6' # یا هر PSM مناسب دیگر
+
+            if preprocessed_cv_image is None: # اگر پیش‌پردازش ناموفق بود
+                df_ocr_processed = self._get_structured_ocr_data(img_cv_original, psm_config='--psm 1')
             else:
-                # ۴. اجرای OCR روی تصویر پیش‌پردازش شده و دریافت DataFrame
-                # با PSM 6 یا PSM دیگری که فکر می‌کنید مناسب است، آزمایش کنید
-                df_ocr_processed = self._get_structured_ocr_data(preprocessed_cv_image, psm_config='--psm 6')
+                df_ocr_processed = self._get_structured_ocr_data(preprocessed_cv_image, psm_config=psm_to_use)
 
-
-            # ۵. استخراج متن OCR (از تصویر پیش‌پردازش شده) برای نمایش در جعبه متن
+            # ۳. استخراج متن OCR (از تصویر پیش‌پردازش شده) برای نمایش در جعبه متن بالایی
             ocr_display_text = self._extract_ocr_text_for_display(df_ocr_processed)
             self.master.after(0, self.update_ocr_text_widget, ocr_display_text)
 
-            # ۶. پاک کردن جعبه متن ترجمه شده
-            self.master.after(0, self.update_translated_text_widget, "")
+            # --- بخش ۴: منطق ترجمه و آماده‌سازی متن برای جعبه متن پایینی ---
+            translated_output_for_widget = ""
 
-            # ۷. آماده‌سازی تصویر اصلی OpenCV برای کشیدن کادرها
-            # کادرها روی کپی تصویر اصلی کشیده می‌شوند تا تصویر اصلی دست نخورده بماند
-            image_with_boxes_cv = img_cv_original.copy()
+            should_translate = self.translate_checkbox_var.get() == "1"
+            current_target_lang_code = self.language_options[self.selected_language_name.get()]
 
-            # خواندن سطح انتخابی برای کادکشی از UI
             selected_level_name = self.selected_draw_level_name.get()
             level_to_draw = self.draw_level_options.get(selected_level_name, 0)
 
-            # print(f"DEBUG: Selected level to draw: {selected_level_name} (Value: {level_to_draw})")
-            # print(f"DEBUG: Number of rows in df_ocr_processed: {len(df_ocr_processed)}")
+            if should_translate and current_target_lang_code != 'en':
+                # اگر حالت "Khat/Jomle (Line)" (تقسیم‌بندی دستی) انتخاب شده بود
+                if level_to_draw == 4:
+                    df_words_for_segmentation = df_ocr_processed[df_ocr_processed['level'] == 5].copy()
+                    if not df_words_for_segmentation.empty:
+                        manually_segmented_lines = self._manually_segment_lines(df_words_for_segmentation, y_tolerance_factor=0.7)
+                        temp_translated_text_list = []
+                        if manually_segmented_lines: # اگر خطی پیدا شد
+                            for line_of_word_series in manually_segmented_lines:
+                                if not line_of_word_series: continue
+                                # متن اصلی خط را از سری‌های پانداس استخراج می‌کنیم
+                                line_text_original = " ".join(str(s['text']).strip() for s in line_of_word_series if str(s['text']).strip())
+
+                                if line_text_original.strip():
+                                    # print(f"DEBUG: Translating manual line: '{line_text_original}'")
+                                    translated_line = translate_en_to_fa_api(line_text_original, target_lang=current_target_lang_code)
+                                    temp_translated_text_list.append(translated_line)
+                                # else: # اگر خط خالی بود، یک خط خالی در ترجمه هم بگذار
+                                #    temp_translated_text_list.append("")
+                            translated_output_for_widget = "\n".join(temp_translated_text_list)
+                        else: # اگر هیچ خطی به صورت دستی پیدا نشد
+                             if ocr_display_text.strip(): # کل متن OCR شده را ترجمه کن
+                                # print(f"DEBUG: No manual lines, translating full OCR text: '{ocr_display_text[:50]}...'")
+                                translated_output_for_widget = translate_en_to_fa_api(ocr_display_text, target_lang=current_target_lang_code)
+                             else:
+                                translated_output_for_widget = "[متنی برای ترجمه خط به خط یافت نشد]"
+                    else: # اگر کلمه‌ای برای تقسیم‌بندی وجود نداشت
+                        if ocr_display_text.strip(): # کل متن OCR شده را ترجمه کن
+                            # print(f"DEBUG: No words for segmentation, translating full OCR text: '{ocr_display_text[:50]}...'")
+                            translated_output_for_widget = translate_en_to_fa_api(ocr_display_text, target_lang=current_target_lang_code)
+                        else:
+                            translated_output_for_widget = "[متنی برای ترجمه یافت نشد]"
+
+                else: # برای سایر حالت‌های کادکشی (کلمه، پاراگراف، بلوک، یا عدم کادکشی)
+                    if ocr_display_text.strip(): # اگر متن OCR شده‌ای وجود دارد
+                        # print(f"DEBUG: Translating full OCR text for other modes: '{ocr_display_text[:50]}...'")
+                        translated_output_for_widget = translate_en_to_fa_api(ocr_display_text, target_lang=current_target_lang_code)
+                    else:
+                        translated_output_for_widget = "[متنی برای ترجمه وجود ندارد]"
+            else: # اگر ترجمه خاموش است یا زبان مقصد انگلیسی است
+                translated_output_for_widget = ocr_display_text # متن اصلی را در جعبه "ترجمه شده" نمایش بده
+                if current_target_lang_code == 'en' and should_translate:
+                     translated_output_for_widget = ocr_display_text # + "\n[متن اصلی - زبان مقصد انگلیسی است]" # این پیام اختیاری است
+
+            self.master.after(0, self.update_translated_text_widget, translated_output_for_widget.strip())
 
 
-            if level_to_draw > 0 and not df_ocr_processed.empty:
-                elements_to_draw = df_ocr_processed[df_ocr_processed['level'] == level_to_draw]
+            # --- بخش ۵: آماده‌سازی تصویر اصلی و کشیدن کادرها ---
+            image_with_boxes_cv = img_cv_original.copy()
+            if level_to_draw > 0 and not df_ocr_processed.empty: # کادکشی فقط اگر سطحی انتخاب شده باشد
+                if level_to_draw == 4: # کادکشی برای خطوط دستی
+                    df_words_for_segmentation = df_ocr_processed[df_ocr_processed['level'] == 5].copy()
+                    if not df_words_for_segmentation.empty:
+                        manually_segmented_lines = self._manually_segment_lines(df_words_for_segmentation, y_tolerance_factor=0.7)
+                        line_box_color = (34, 139, 34)
+                        for line_of_word_series in manually_segmented_lines:
+                            if not line_of_word_series: continue
+                            min_x = min(int(s['left']) for s in line_of_word_series)
+                            min_y = min(int(s['top']) for s in line_of_word_series)
+                            max_x_coord = max(int(s['left']) + int(s['width']) for s in line_of_word_series)
+                            max_y_coord = max(int(s['top']) + int(s['height']) for s in line_of_word_series)
+                            if max_x_coord > min_x and max_y_coord > min_y:
+                                 cv.rectangle(image_with_boxes_cv, (min_x, min_y), (max_x_coord, max_y_coord), line_box_color, 2)
+                else: # کادرکشی برای سطوح تشخیص داده شده توسط تسراکت (کلمه، پاراگراف، بلوک)
+                    elements_to_draw = df_ocr_processed[df_ocr_processed['level'] == level_to_draw]
+                    color_map = {5: (0,0,255), 3: (255,165,0), 2: (128,0,128)}
+                    box_color = color_map.get(level_to_draw, (255,0,0))
+                    for _, ocr_element in elements_to_draw.iterrows():
+                        if int(ocr_element['width']) > 0 and int(ocr_element['height']) > 0 :
+                            x,y,w,h = int(ocr_element['left']),int(ocr_element['top']),int(ocr_element['width']),int(ocr_element['height'])
+                            cv.rectangle(image_with_boxes_cv, (x, y), (x + w, y + h), box_color, 2)
 
-                # print(f"DEBUG: Number of elements found for level {level_to_draw}: {len(elements_to_draw)}")
-
-                color_map = {5: (0,0,255), 4: (34,139,34), 3: (255,165,0), 2: (128,0,128)}
-                box_color = color_map.get(level_to_draw, (255,0,0))
-
-                for _, ocr_element in elements_to_draw.iterrows():
-                    if int(ocr_element['width']) > 0 and int(ocr_element['height']) > 0 :
-                        x, y, w, h = int(ocr_element['left']), int(ocr_element['top']), int(ocr_element['width']), int(ocr_element['height'])
-                        # کادرها روی image_with_boxes_cv (که کپی تصویر اصلی است) کشیده می‌شوند
-                        cv.rectangle(image_with_boxes_cv, (x, y), (x + w, y + h), box_color, 2)
-
-            # تبدیل تصویر OpenCV (که حالا کادرها را دارد) به فرمت PIL برای نمایش
-            # این تصویر، تصویر *اصلی* است که رویش کادر کشیده شده
             image_to_show_pil = pl.Image.fromarray(cv.cvtColor(image_with_boxes_cv, cv.COLOR_BGR2RGB))
-
-            # ۸. تغییر اندازه تصویر برای نمایش در UI
             resized_pil_image = self._resize_image_for_tk(image_to_show_pil, self.image_container)
-
-            # ۹. نمایش تصویر در UI
             self.master.after(0, self.update_image_display, resized_pil_image)
 
         except ValueError as ve:
@@ -343,6 +382,67 @@ class OCRTranslatorApp:
         except Exception as e:
             print(f"خطا در به‌روزرسانی نمایش تصویر: {e}")
 
+    def _manually_segment_lines(self, df_words, y_tolerance_factor=0.7):
+        """
+        کلمات (DataFrame ورودی شامل level 5) را بر اساس نزدیکی عمودی به خطوط دستی تقسیم می‌کند.
+        y_tolerance_factor: ضریبی از ارتفاع کلمه برای تعیین حداکثر فاصله عمودی مجاز بین مراکز دو کلمه در یک خط.
+        خروجی: لیستی از لیست‌ها، که هر لیست داخلی شامل ردیف‌های DataFrame کلمات یک خط است.
+        """
+        if df_words.empty:
+            return []
+
+        # کلمات باید بر اساس مختصات عمودی (top) و سپس افقی (left) مرتب شوند
+        # این به پردازش ترتیبی کمک می‌کند
+        # اطمینان حاصل می‌کنیم که ستون‌های مورد نیاز عددی هستند
+        for col in ['top', 'left', 'height', 'word_num']: # word_num برای مرتب‌سازی ثانویه در صورت y یکسان
+            if col not in df_words.columns or not pd.api.types.is_numeric_dtype(df_words[col]):
+                print(f"هشدار: ستون '{col}' برای تقسیم‌بندی دستی خطوط موجود نیست یا عددی نیست.")
+                # یک مرتب‌سازی پایه انجام می‌دهیم اگر ستون‌ها موجود نباشند
+                df_words = df_words.sort_values(by=df_words.columns[0]) # یک مرتب‌سازی خیلی ساده
+                break
+        else: # اگر حلقه بدون break تمام شد یعنی همه ستون‌ها بودند
+            df_words = df_words.sort_values(by=['top', 'left', 'word_num'], ascending=[True, True, True])
+
+
+        all_lines = []
+        current_line_words = []
+
+        if df_words.empty: # اگر پس از مرتب‌سازی یا به هر دلیلی خالی شد
+            return []
+
+        for index, word_series in df_words.iterrows():
+            word_top = int(word_series['top'])
+            word_height = int(word_series['height'])
+            word_center_y = word_top + (word_height / 2)
+
+            if not current_line_words: # اگر این اولین کلمه در خط فعلی است
+                current_line_words.append(word_series)
+            else:
+                # میانگین مرکز عمودی کلمات در خط فعلی را محاسبه کن
+                # یا از آخرین کلمه خط فعلی استفاده کن
+                last_word_in_line = current_line_words[-1]
+                last_word_top = int(last_word_in_line['top'])
+                last_word_height = int(last_word_in_line['height'])
+                last_word_center_y = last_word_top + (last_word_height / 2)
+
+                # آستانه تحمل: ضریبی از ارتفاع کلمه فعلی یا کلمه قبلی
+                # یا یک مقدار ثابت کوچک، یا ترکیبی
+                y_threshold = max(word_height, last_word_height) * y_tolerance_factor
+
+                if abs(word_center_y - last_word_center_y) < y_threshold:
+                    # کلمه به خط فعلی تعلق دارد
+                    current_line_words.append(word_series)
+                else:
+                    # کلمه به خط جدیدی تعلق دارد
+                    all_lines.append(current_line_words) # خط قبلی را ذخیره کن
+                    current_line_words = [word_series] # خط جدید را با این کلمه شروع کن
+
+        # آخرین خط جمع‌آوری شده را اضافه کن
+        if current_line_words:
+            all_lines.append(current_line_words)
+
+        # print(f"DEBUG: Manually segmented into {len(all_lines)} lines.")
+        return all_lines
 
     def update_ocr_text_widget(self, text):
         self.ocr_text_widget.config(state='normal')
