@@ -22,5 +22,3 @@ DEFAULT_OCR_LANG = 'eng'
 DEFAULT_OCR_PSM_CONFIG = '--psm 6' # PSM مناسب برای تصاویر پیش‌پردازش شده و تشخیص کلمات
 DEFAULT_Y_TOLERANCE_FACTOR_MANUAL_LINES = 0.7 # برای تقسیم‌بندی دستی خطوط
 WORD_CONFIDENCE_THRESHOLD = 20 # حداقل اطمینان برای پردازش یا نمایش یک کلمه
-
-WORD_CONFIDENCE_THRESHOLD_DEFAULT = 20 # مقدار پیش‌فرض برای حداقل اطمینان کلمات (0-100)
