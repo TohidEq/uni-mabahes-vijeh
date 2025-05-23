@@ -1,8 +1,8 @@
 # main_app.py
 import numpy as np
 import pandas as pd
-import PIL as pl
-from PIL import ImageFont, ImageDraw, Image, ImageTk
+# استفاده مستقیم از Image, ImageFont, ImageTk از PIL
+from PIL import Image, ImageFont, ImageTk
 import cv2 as cv
 import pytesseract # برای استفاده از pytesseract.Output
 
@@ -10,26 +10,28 @@ import threading
 from tkinter import Tk, Label, Button, filedialog, PhotoImage, StringVar, OptionMenu, Entry, Checkbutton, scrolledtext
 from tkinter import ttk
 from tkinter import messagebox
-from io import StringIO
-import csv
+# io و csv دیگر مستقیماً در اینجا استفاده نمی‌شوند (به ocr_utils منتقل شده‌اند)
 import traceback # برای چاپ کامل خطاها
 
-# Import translation function and configuration from separate files
+# --- ایمپورت توابع از ماژول‌های جدید ---
 from translation_api import translate_en_to_fa_api
-from config import FONT_PATH, GLOBAL_FONT_DEFAULT_SIZE, LANGUAGE_OPTIONS, MIN_FONT_SIZE, MAX_FONT_SIZE
+from config import (FONT_PATH, GLOBAL_FONT_DEFAULT_SIZE, LANGUAGE_OPTIONS,
+                    MIN_FONT_SIZE, MAX_FONT_SIZE, DEFAULT_OCR_LANG,
+                    DEFAULT_OCR_PSM_CONFIG, DEFAULT_Y_TOLERANCE_FACTOR_MANUAL_LINES,
+                    WORD_CONFIDENCE_THRESHOLD) # ثابت‌های جدید از config
+from ocr_utils import (preprocess_image_for_ocr, get_structured_ocr_data,
+                       extract_ocr_text_for_display, manually_segment_lines)
+from drawing_utils import draw_text_on_cv_image, resize_pil_image_for_tk
+# --- پایان ایمپورت‌ها ---
 
 import warnings
 warnings.filterwarnings("ignore")
 
-
 # --- بررسی اولیه و سراسری فونت هنگام شروع برنامه ---
-# global_font_instance_check: یک متغیر سراسری برای نگهداری نتیجه اولین تلاش برای بارگذاری فونت.
-global_font_instance_check = None # مقدار اولیه
+global_font_instance_check = None
 try:
-    if FONT_PATH and FONT_PATH.strip() != "": # بررسی اینکه مسیر فونت خالی نباشد
-        # تلاش برای بارگذاری فونت با اندازه پیش‌فرض جهانی
+    if FONT_PATH and FONT_PATH.strip() != "":
         global_font_instance_check = ImageFont.truetype(FONT_PATH, GLOBAL_FONT_DEFAULT_SIZE)
-        # print(f"DEBUG: Initial font check successful. Font object: {global_font_instance_check}")
     else:
         print("هشدار جدی: مسیر فونت (FONT_PATH) در config.py تعریف نشده یا خالی است. متن روی تصویر نمایش داده نخواهد شد.")
 except IOError:
@@ -37,10 +39,6 @@ except IOError:
 except Exception as e:
     print(f"خطای ناشناخته هنگام بررسی اولیه فونت از مسیر '{FONT_PATH}': {e}")
 # --- پایان بررسی اولیه فونت ---
-
-
-
-
 
 class OCRTranslatorApp:
     def __init__(self, master):
@@ -51,107 +49,92 @@ class OCRTranslatorApp:
         self.current_image_path = None
         self.translated_image_tk = None
 
+        self.last_img_cv_original = None
+        self.last_pil_original = None
+        self.last_df_ocr_processed = None
+        self.last_render_segments = []
+        self.last_ocr_display_text = ""
+        self.last_translated_output_for_widget = ""
+
+        self.prev_font_size = str(GLOBAL_FONT_DEFAULT_SIZE)
+        self.prev_language_name = ""
+        self.prev_translate_enabled = "1"
+        self.prev_draw_level = ""
+
         self.selected_language_name = StringVar(master)
         default_lang_key = "Engilisi (English)"
         for key, code in LANGUAGE_OPTIONS.items():
-            if code == "fa": # زبان پیش‌فرض فارسی
-                default_lang_key = key
-                break
+            if code == "fa": default_lang_key = key; break
         self.selected_language_name.set(default_lang_key)
         self.language_options = LANGUAGE_OPTIONS
 
         self.translate_checkbox_var = StringVar(master, value="1")
         self.font_size_var = StringVar(master, value=str(GLOBAL_FONT_DEFAULT_SIZE))
 
-        # متغیر و گزینه‌ها برای انتخاب سطح کادکشی
         self.selected_draw_level_name = StringVar(master)
         self.draw_level_options = {
-            "Kadr Nakeshid (None)": 0,
-            "Kalame (Word)": 5,
-            "Khat/Jomle (Line)": 4, # این گزینه از تقسیم‌بندی دستی خطوط استفاده خواهد کرد
-            "Paragraph (Tesseract)": 3, # غیر فعال
-            "Block Matn (Tesseract)": 2 # غیر فعال
+            "Kadr Nakeshid (None)": 0, "Kalame (Word)": 5,
+            "Khat/Jomle (Line)": 4, "Paragraph (Tesseract)": 3,
+            "Block Matn (Tesseract)": 2
         }
         self.selected_draw_level_name.set("Khat/Jomle (Line)")
 
-        # --- متغیرهای جدید برای ذخیره وضعیت و داده‌های پردازش قبلی ---
-        self.last_img_cv_original = None
-        self.last_df_ocr_processed = None # DataFrame کامل OCR شده
-        self.last_render_segments = []    # لیستی از دیکشنری‌ها برای کشیدن کادر و متن
-                                          # هر دیکشنری: {'rect': (x,y,w,h), 'text': "متن نمایشی", 'draw_text': True/False, 'color': (r,g,b)}
-        self.last_ocr_display_text = ""   # متن برای جعبه OCR
-        self.last_translated_output_for_widget = "" # متن برای جعبه ترجمه شده
-
-        # ذخیره تنظیمات قبلی برای تشخیص نوع تغییر
-        self.prev_font_size = self.font_size_var.get()
         self.prev_language_name = self.selected_language_name.get()
-        self.prev_translate_enabled = self.translate_checkbox_var.get()
         self.prev_draw_level = self.selected_draw_level_name.get()
 
-
-        # --- Control Frame ---
+        # --- UI Elements ---
         self.control_frame = ttk.Frame(master, padding="10")
         self.control_frame.pack(side="top", fill="x")
-
+        # ... (تمام ویجت‌های control_frame مثل قبل اینجا تعریف و pack می‌شوند) ...
         self.select_button = Button(self.control_frame, text="Entekhab Tasvir", command=self.select_image)
         self.select_button.pack(side="left", padx=5, pady=5)
-
         ttk.Label(self.control_frame, text="Zaban Tarjomeh:").pack(side="left", padx=(10, 2), pady=5)
         self.language_menu = OptionMenu(self.control_frame, self.selected_language_name, *self.language_options.keys())
         self.language_menu.pack(side="left", padx=5, pady=5)
         self.selected_language_name.trace_add("write", self.on_setting_change)
-
         self.translate_checkbox = Checkbutton(self.control_frame, text="Tarjome Kon", variable=self.translate_checkbox_var, onvalue="1", offvalue="0", command=self.on_setting_change)
         self.translate_checkbox.pack(side="left", padx=10, pady=5)
-
         ttk.Label(self.control_frame, text="Kadr Dore:").pack(side="left", padx=(10,2), pady=5)
         self.draw_level_menu = OptionMenu(self.control_frame, self.selected_draw_level_name, *self.draw_level_options.keys())
         self.draw_level_menu.pack(side="left", padx=5, pady=5)
         self.selected_draw_level_name.trace_add("write", self.on_setting_change)
-
         ttk.Label(self.control_frame, text=f"Font Size ({MIN_FONT_SIZE}-{MAX_FONT_SIZE}):").pack(side="left", padx=(10, 2), pady=5)
         self.font_size_entry = Entry(self.control_frame, textvariable=self.font_size_var, width=5)
         self.font_size_entry.pack(side="left", padx=5, pady=5)
         self.font_size_entry.bind("<Return>", self.on_setting_change)
         self.font_size_entry.bind("<FocusOut>", self.on_setting_change)
-
         self.exit_button = Button(self.control_frame, text="Khorooj", command=master.quit)
         self.exit_button.pack(side="right", padx=5, pady=5)
 
-        # --- Main Content Frame ---
         self.main_content_frame = ttk.Frame(master, padding="10")
         self.main_content_frame.pack(side="top", fill="both", expand=True)
         self.main_content_frame.grid_columnconfigure(0, weight=1)
         self.main_content_frame.grid_columnconfigure(1, weight=1)
         self.main_content_frame.grid_rowconfigure(0, weight=1)
-
         self.image_container = ttk.Frame(self.main_content_frame)
         self.image_container.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
         self.image_label = Label(self.image_container, bd=2, relief="groove")
         self.image_label.pack(fill="both", expand=True)
-
         self.text_boxes_frame = ttk.Frame(self.main_content_frame, padding="5")
         self.text_boxes_frame.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
         self.text_boxes_frame.grid_rowconfigure(0, weight=1)
         self.text_boxes_frame.grid_rowconfigure(1, weight=1)
         self.text_boxes_frame.grid_columnconfigure(0, weight=1)
-
         self.ocr_text_frame = ttk.LabelFrame(self.text_boxes_frame, text="Matn Shenasayi Shode", padding="5")
         self.ocr_text_frame.grid(row=0, column=0, sticky="nsew", pady=(0,2))
         self.ocr_text_widget = scrolledtext.ScrolledText(self.ocr_text_frame, wrap='word', height=10, width=30, font=("tahoma", 9))
         self.ocr_text_widget.pack(fill="both", expand=True)
-
         self.translated_text_frame = ttk.LabelFrame(self.text_boxes_frame, text="Matn Tarjome Shode", padding="5")
         self.translated_text_frame.grid(row=1, column=0, sticky="nsew", pady=(2,0))
         self.translated_text_widget = scrolledtext.ScrolledText(self.translated_text_frame, wrap='word', height=10, width=30, font=("tahoma", 9))
         self.translated_text_widget.pack(fill="both", expand=True)
 
-        # --- Status Bar ---
         self.status_frame = ttk.Frame(master, padding="5")
         self.status_frame.pack(side="bottom", fill="x")
         self.progress_bar = ttk.Progressbar(self.status_frame, orient="horizontal", length=200, mode="indeterminate")
         self.status_label = Label(self.status_frame, text="Amadeh", fg="white", bg="gray25")
         self.status_label.pack(side="left", padx=10)
+
 
     def on_setting_change(self, *args):
         if not self.current_image_path:
@@ -170,261 +153,98 @@ class OCRTranslatorApp:
             current_draw_level == self.prev_draw_level
         )
 
-        # اگر فقط فونت تغییر کرده و داده‌های پردازش قبلی برای تصویر موجود است
-        if font_changed_only and self.last_img_cv_original is not None and self.last_df_ocr_processed is not None:
-            self.status_label.config(text="در حال اعمال فونت جدید روی تصویر...")
-            # self.prev_font_size = current_font_size # به‌روزرسانی بلافاصله قبل از ترد
-                                                  # یا در انتهای _rerender_image_annotations
-
-            # نمایش progress_bar برای عملیات بازترسیمی هم خوب است
-            if not self.progress_bar.winfo_ismapped():
-                self.progress_bar.pack(side="left", padx=5)
+        if font_changed_only and self.last_img_cv_original is not None:
+            self.status_label.config(text="در حال اعمال فونت جدید...")
+            if not self.progress_bar.winfo_ismapped(): self.progress_bar.pack(side="left", padx=5)
             self.progress_bar.start()
-
-            threading.Thread(target=self._rerender_image_annotations,
-                             args=(current_font_size,), # ارسال اندازه فونت جدید
-                             daemon=True).start()
-        else: # اگر تنظیمات دیگری تغییر کرده یا اولین پردازش است
-            self.status_label.config(text="در حال پردازش مجدد با تنظیمات جدید...")
-
-            # ذخیره تمام تنظیمات فعلی به عنوان تنظیمات قبلی برای مقایسه بعدی
-            # این کار باید قبل از شروع ترد process_image انجام شود تا در صورت تغییر سریع کاربر،
-            # مقادیر درست برای مقایسه بعدی ذخیره شوند.
-            # self.prev_font_size = current_font_size
-            # self.prev_language_name = current_language_name
-            # self.prev_translate_enabled = current_translate_enabled
-            # self.prev_draw_level = current_draw_level
-            # بهتر است اینها در انتهای process_image یا _rerender به‌روز شوند.
-
-            if not self.progress_bar.winfo_ismapped():
-                self.progress_bar.pack(side="left", padx=5)
+            threading.Thread(target=self._rerender_image_annotations, daemon=True).start()
+        else:
+            self.status_label.config(text="در حال پردازش مجدد...")
+            if not self.progress_bar.winfo_ismapped(): self.progress_bar.pack(side="left", padx=5)
             self.progress_bar.start()
-
-            # اجرای پردازش کامل
             threading.Thread(target=self.process_image, args=(self.current_image_path,), daemon=True).start()
 
     def select_image(self):
         file_path = filedialog.askopenfilename(title="Entekhab Tasvir", filetypes=[("Image Files", "*.png *.jpg *.jpeg")])
         if file_path:
             self.current_image_path = file_path
+            self.last_img_cv_original = None # ریست کردن داده‌های قبلی
+            self.last_pil_original = None
+            self.last_df_ocr_processed = None
+            self.last_render_segments = []
             self.status_label.config(text="Dar hale pardazesh ...")
-            if not self.progress_bar.winfo_ismapped():
-                self.progress_bar.pack(side="left", padx=5)
+            if not self.progress_bar.winfo_ismapped(): self.progress_bar.pack(side="left", padx=5)
             self.progress_bar.start()
             threading.Thread(target=self.process_image, args=(file_path,), daemon=True).start()
 
-    # --- Helper Functions ---
     def _load_current_font(self):
-        """ فونت را با اندازه انتخاب شده توسط کاربر بارگذاری می‌کند. """
         try:
             font_size_str = self.font_size_var.get()
-            if not font_size_str.isdigit(): # اگر ورودی عدد نیست
-                raise ValueError("اندازه فونت باید عدد باشد.")
+            if not font_size_str.isdigit(): raise ValueError("اندازه فونت باید عدد باشد.")
             font_size = int(font_size_str)
-
             if not (MIN_FONT_SIZE <= font_size <= MAX_FONT_SIZE):
-                # اگر کاربر اندازه نامعتبر وارد کرد، به اندازه پیش‌فرض برمی‌گردیم
-                # self.master.after(0, lambda: messagebox.showwarning("اندازه فونت نامعتبر", f"اندازه فونت باید بین {MIN_FONT_SIZE} و {MAX_FONT_SIZE} باشد. از اندازه پیش‌فرض استفاده شد."))
                 font_size = GLOBAL_FONT_DEFAULT_SIZE
                 self.font_size_var.set(str(GLOBAL_FONT_DEFAULT_SIZE))
-
-            # global_font_instance_check فقط برای این بود که بدانیم FONT_PATH از ابتدا معتبر بوده یا نه
             if FONT_PATH and global_font_instance_check:
                 return ImageFont.truetype(FONT_PATH, font_size)
-            else:
-                if not FONT_PATH or not FONT_PATH.strip():
-                    print("هشدار: FONT_PATH در config.py تعریف نشده است.")
-                elif not global_font_instance_check:
-                     print(f"هشدار: فونت اولیه از مسیر '{FONT_PATH}' بارگذاری نشده. متن روی تصویر نمایش داده نمی‌شود.")
-                return None
-        except ValueError as ve: # اگر کاربر چیزی غیر از عدد برای اندازه فونت وارد کرد
-            # print(f"خطای مقدار برای اندازه فونت: {ve}")
-            self.font_size_var.set(str(GLOBAL_FONT_DEFAULT_SIZE)) # برگرداندن به پیش‌فرض
-            if FONT_PATH and global_font_instance_check: # تلاش مجدد با پیش‌فرض
-                try:
-                    return ImageFont.truetype(FONT_PATH, GLOBAL_FONT_DEFAULT_SIZE)
-                except Exception as e_inner:
-                    print(f"خطا در بارگذاری فونت پیش‌فرض پس از ورودی نامعتبر: {e_inner}")
             return None
-        except Exception as e:
-            print(f"خطای ناشناخته در بارگذاری فونت با اندازه دلخواه: {e}")
+        except ValueError:
+            self.font_size_var.set(str(GLOBAL_FONT_DEFAULT_SIZE))
+            if FONT_PATH and global_font_instance_check:
+                try: return ImageFont.truetype(FONT_PATH, GLOBAL_FONT_DEFAULT_SIZE)
+                except Exception: pass
             return None
+        except Exception: return None
 
     def _load_images_from_path(self, img_path):
         try:
-            img_pil = pl.Image.open(img_path)
-            # تبدیل به RGB اگر RGBA یا P باشد (برای سازگاری با OpenCV)
-            if img_pil.mode == 'RGBA' or img_pil.mode == 'P':
-                img_pil = img_pil.convert('RGB')
-            img_cv = cv.imread(img_path)
-            if img_cv is None:
-                raise ValueError("OpenCV نتوانست تصویر را بارگذاری کند.")
+            img_pil = Image.open(img_path) # استفاده از Image به جای pl.Image
+            if img_pil.mode == 'RGBA' or img_pil.mode == 'P': img_pil = img_pil.convert('RGB')
+            img_cv = cv.cvtColor(np.array(img_pil), cv.COLOR_RGB2BGR)
+            if img_cv is None: raise ValueError("تبدیل تصویر PIL به OpenCV ناموفق بود.")
             return img_pil, img_cv
-        except FileNotFoundError:
-            raise ValueError(f"فایل تصویر '{img_path}' یافت نشد.")
-        except Exception as e:
-            raise ValueError(f"خطا در بارگذاری تصویر '{img_path}': {e}")
+        except FileNotFoundError: raise ValueError(f"فایل تصویر '{img_path}' یافت نشد.")
+        except Exception as e: raise ValueError(f"خطا در بارگذاری تصویر '{img_path}': {e}")
 
-    def _preprocess_image_for_ocr(self, img_cv):
-        if img_cv is None: return None
-        try:
-            if len(img_cv.shape) == 3: gray = cv.cvtColor(img_cv, cv.COLOR_BGR2GRAY)
-            else: gray = img_cv
-
-            blurred = cv.GaussianBlur(gray, (5, 5), 0)
-            # استفاده از THRESH_BINARY_INV ممکن است برای برخی تصاویر بهتر باشد (متن سفید، پس‌زمینه سیاه)
-            # یا THRESH_BINARY (متن سیاه، پس‌زمینه سفید)
-            thresh = cv.adaptiveThreshold(blurred, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                         cv.THRESH_BINARY_INV, 21, 4)
-            return thresh
-        except Exception as e:
-            print(f"خطا در پیش‌پردازش تصویر: {e}")
-            return img_cv # در صورت خطا، تصویر اصلی (یا خاکستری شده) را برگردان
-
-    def _get_structured_ocr_data(self, ocr_input_image_cv, psm_config='--psm 6'):
-        if ocr_input_image_cv is None: return pd.DataFrame()
-        try:
-            if len(ocr_input_image_cv.shape) == 2: # خاکستری یا دودویی
-                img_pil_for_tesseract = pl.Image.fromarray(ocr_input_image_cv)
-            elif len(ocr_input_image_cv.shape) == 3: # رنگی (که نباید پس از پیش‌پردازش باشد)
-                img_pil_for_tesseract = pl.Image.fromarray(cv.cvtColor(ocr_input_image_cv, cv.COLOR_BGR2RGB))
-            else: raise ValueError("فرمت کانال تصویر ورودی به OCR نامشخص است.")
-
-            df = pytesseract.image_to_data(img_pil_for_tesseract, lang='eng',
-                                           output_type=pytesseract.Output.DATAFRAME,
-                                           config=psm_config)
-        except pytesseract.TesseractError as tess_err:
-            print(f"خطای اجرایی Tesseract در _get_structured_ocr_data: {tess_err}")
-            raise
-        except Exception as e:
-            print(f"خطای ناشناخته هنگام اجرای image_to_data: {e}")
-            raise
-
-        if df is None or df.empty: return pd.DataFrame()
-        df.dropna(subset=['text'], inplace=True)
-        df = df[df['text'].astype(str).str.strip() != '']
-        if df.empty: return pd.DataFrame()
-
-        df['conf'] = pd.to_numeric(df['conf'], errors='coerce').fillna(-1).astype(int)
-        structural_cols = ['level','page_num','block_num','par_num','line_num','word_num','left','top','width','height']
-        for col in structural_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
-            else: raise ValueError(f"ستون حیاتی '{col}' در خروجی Tesseract نیست.")
-        return df
-
-    def _extract_ocr_text_for_display(self, df_ocr):
-        ocr_full_text = ""
-        if df_ocr.empty or not (df_ocr['level'] == 5).any(): return ""
-        df_words = df_ocr[df_ocr['level'] == 5].copy()
-        if df_words.empty: return ""
-        grouped_for_text = df_words.groupby(['page_num','block_num','par_num','line_num'], sort=True)
-        for _, group in grouped_for_text:
-            line_text = " ".join(group.sort_values(by='word_num')['text'].astype(str).tolist())
-            ocr_full_text += line_text + "\n"
-        return ocr_full_text.strip()
-
-    def _manually_segment_lines(self, df_words, y_tolerance_factor=0.7):
-        if df_words.empty: return []
-        # اطمینان از وجود و عددی بودن ستون‌های لازم
-        required_cols = {'top':0, 'left':0, 'height':0, 'word_num':0, 'text':""}
-        for col, default_val in required_cols.items():
-            if col not in df_words.columns:
-                print(f"هشدار جدی: ستون '{col}' برای تقسیم‌بندی دستی خطوط موجود نیست.")
-                return [] # یا یک خطا ایجاد کن
-            if not pd.api.types.is_numeric_dtype(df_words[col]) and col != 'text':
-                df_words[col] = pd.to_numeric(df_words[col], errors='coerce').fillna(default_val)
-                # print(f"هشدار: ستون '{col}' عددی نبود و تبدیل شد.")
-
-        df_words = df_words.sort_values(by=['top', 'left', 'word_num'], ascending=[True, True, True])
-        all_lines, current_line_words = [], []
-        if df_words.empty: return []
-
-        for _, word_series in df_words.iterrows():
-            word_top, word_height = int(word_series['top']), int(word_series['height'])
-            word_center_y = word_top + (word_height / 2)
-            if not current_line_words:
-                current_line_words.append(word_series)
-            else:
-                last_word_in_line = current_line_words[-1]
-                last_word_top, last_word_height = int(last_word_in_line['top']), int(last_word_in_line['height'])
-                last_word_center_y = last_word_top + (last_word_height / 2)
-                y_threshold = max(word_height, last_word_height) * y_tolerance_factor
-                if abs(word_center_y - last_word_center_y) < y_threshold:
-                    current_line_words.append(word_series)
-                else:
-                    all_lines.append(current_line_words)
-                    current_line_words = [word_series]
-        if current_line_words: all_lines.append(current_line_words)
-        return all_lines
-
-    def _resize_image_for_tk(self, pil_img, target_widget):
-        try:
-            container_width, container_height = target_widget.winfo_width(), target_widget.winfo_height()
-            if container_width < 50 or container_height < 50:
-                master_width = target_widget.winfo_toplevel().winfo_width()
-                master_height = target_widget.winfo_toplevel().winfo_height()
-                # تخمین بر اساس اینکه کانتینر عکس در یک ستون گرید با وزن ۱ (از ۲ ستون) قرار دارد
-                container_width = int(master_width * 0.48)
-                container_height = int(master_height * 0.85) # ارتفاع بیشتری می‌گیرد
-                if container_width < 50: container_width = 300
-                if container_height < 50: container_height = 300
-
-            img_copy = pil_img.copy()
-            if img_copy.width > container_width or img_copy.height > container_height:
-                img_copy.thumbnail((container_width, container_height), pl.Image.Resampling.LANCZOS)
-            return img_copy
-        except Exception as e:
-            print(f"خطا در تغییر اندازه تصویر: {e}")
-            return pil_img
-
-    def _rerender_image_annotations(self, new_font_size_str): # یا مستقیم شیء فونت را بگیرد
-        """فقط کادرها و متون را با استفاده از داده‌های قبلی و فونت جدید روی تصویر بازترسیمی می‌کند."""
+    def _rerender_image_annotations(self): # دیگر آرگومان فونت سایز نمی‌گیرد، از self.font_size_var می‌خواند
+        """فقط کادرها و متون را با استفاده از داده‌های قبلی و فونت جدید بازترسیمی می‌کند."""
         try:
             self.status_label.config(text="اعمال فونت جدید...")
-
-            # ۱. بارگذاری فونت جدید
-            # تابع _load_current_font از self.font_size_var.get() استفاده می‌کند.
-            # باید مطمئن شویم self.font_size_var با new_font_size_str به‌روز شده یا مستقیم از آن استفاده کنیم.
-            # چون on_setting_change قبل از این ترد اجرا شده، self.font_size_var.get() باید مقدار جدید را بدهد.
             new_font = self._load_current_font()
-            if new_font is None and global_font_instance_check: # اگر فونت جدید لود نشد اما قبلا فونت داشتیم
-                print("هشدار: فونت جدید بارگذاری نشد، از فونت پیش‌فرض اولیه استفاده می‌شود (اگر موجود باشد).")
-                new_font = global_font_instance_check # بازگشت به فونت اولیه بررسی شده
+            if new_font is None and global_font_instance_check :
+                new_font = global_font_instance_check
 
             if self.last_img_cv_original is None or not self.last_render_segments:
-                print("DEBUG: داده‌های قبلی برای بازترسیمی موجود نیست.")
+                print("DEBUG: داده‌های قبلی برای بازترسیمی موجود نیست (در _rerender).")
                 self.master.after(0, self.stop_loading_and_update_status)
                 return
 
             image_to_annotate_cv = self.last_img_cv_original.copy()
 
-            # ۲. بازترسیمی کادرها و متون از self.last_render_segments
             for segment in self.last_render_segments:
                 rect = segment.get('rect')
                 text_on_image = segment.get('text_on_image', "")
                 should_draw_text = segment.get('draw_text', False)
-                box_color = segment.get('color', (255,0,0)) # قرمز پیش‌فرض
+                box_color = segment.get('color', (255,0,0))
 
                 if rect:
                     x, y, w, h = rect
                     cv.rectangle(image_to_annotate_cv, (x, y), (x + w, y + h), box_color, 2)
 
                 if should_draw_text and text_on_image.strip() and new_font:
-                    # استفاده از تابع کمکی _draw_text_on_cv_image برای نوشتن متن
-                    image_to_annotate_cv = self._draw_text_on_cv_image(
+                    # مختصات x و y برای draw_text_on_cv_image، مختصات بالای کادر است
+                    image_to_annotate_cv = draw_text_on_cv_image(
                         image_to_annotate_cv, text_on_image,
-                        x, y, # مختصات بالای کادر به عنوان مبنا
-                        new_font
+                        x, y, new_font # ارسال x و y کادر
                     )
 
-            # ۳. تبدیل و نمایش تصویر
-            final_image_pil = pl.Image.fromarray(cv.cvtColor(image_to_annotate_cv, cv.COLOR_BGR2RGB))
-            resized_pil_image = self._resize_image_for_tk(final_image_pil, self.image_container)
-            self.master.after(0, self.update_image_display, resized_pil_image)
+            final_image_pil = Image.fromarray(cv.cvtColor(image_to_annotate_cv, cv.COLOR_BGR2RGB))
+            container_width = self.image_container.winfo_width()
+            container_height = self.image_container.winfo_height()
+            resized_pil_image = resize_pil_image_for_tk(final_image_pil, container_width, container_height)
 
-            # ۴. به‌روزرسانی مقدار قبلی فونت (چون فقط فونت تغییر کرده)
-            self.prev_font_size = new_font_size_str # یا self.font_size_var.get()
+            self.master.after(0, self.update_image_display, resized_pil_image)
+            self.prev_font_size = self.font_size_var.get()
 
         except Exception as e:
             print(f"خطا در بازترسیمی با فونت جدید: {e}")
@@ -433,43 +253,45 @@ class OCRTranslatorApp:
         finally:
             self.master.after(0, self.stop_loading_and_update_status)
 
-    # Main Image Processing Logic
     def process_image(self, img_path):
-        # --- بخش ذخیره‌سازی در انتهای process_image ---
-        # این بخش باید در انتهای بلوک try (قبل از finally) و پس از تمام پردازش‌ها و نمایش‌ها قرار گیرد
-        # تا فقط در صورت موفقیت کامل، داده‌ها و تنظیمات قبلی به‌روز شوند.
-
-        # متغیر list_of_segments_for_rendering برای جمع‌آوری اطلاعات ترسیمی
-        list_of_segments_for_rendering = []
-
         try:
             current_font_for_drawing = self._load_current_font()
-            # ... (بارگذاری تصویر، پیش‌پردازش، OCR -> df_ocr_processed ... دقیقا مثل قبل) ...
+            if current_font_for_drawing is None:
+                print("هشدار جدی: فونت برای نوشتن روی تصویر بارگذاری نشد.")
+
             img_pil_original, img_cv_original = self._load_images_from_path(img_path)
-            # ... ( بقیه کد تا قبل از حلقه اصلی کادکشی و ترجمه، مشابه قبل است ) ...
             img_cv_for_preprocessing = img_cv_original.copy()
-            preprocessed_cv_image = self._preprocess_image_for_ocr(img_cv_for_preprocessing)
-            psm_to_use = '--psm 6'
+            preprocessed_cv_image = preprocess_image_for_ocr(img_cv_for_preprocessing) # از ocr_utils
+
             ocr_input_for_df = preprocessed_cv_image if preprocessed_cv_image is not None else img_cv_original
-            df_ocr_processed = self._get_structured_ocr_data(ocr_input_for_df, psm_config=psm_to_use)
-            ocr_display_text = self._extract_ocr_text_for_display(df_ocr_processed)
+            df_ocr_processed = get_structured_ocr_data(ocr_input_for_df, # از ocr_utils
+                                                       lang=DEFAULT_OCR_LANG,
+                                                       psm_config=DEFAULT_OCR_PSM_CONFIG)
+
+            ocr_display_text = extract_ocr_text_for_display(df_ocr_processed) # از ocr_utils
             self.master.after(0, self.update_ocr_text_widget, ocr_display_text)
 
-            translated_output_for_widget = ""
+            # --- آماده سازی برای ترجمه و رندر ---
+            list_of_segments_for_rendering = []
+            translated_output_for_widget = ocr_display_text # پیش‌فرض اگر ترجمه خاموش باشد
+
             should_translate = self.translate_checkbox_var.get() == "1"
             current_target_lang_code = self.language_options[self.selected_language_name.get()]
             selected_level_name = self.selected_draw_level_name.get()
             level_to_draw = self.draw_level_options.get(selected_level_name, 0)
+
             image_with_annotations_cv = img_cv_original.copy()
 
-
-            # --- منطق اصلی برای کادکشی، ترجمه، و آماده‌سازی self.last_render_segments ---
-            if level_to_draw == 4: # حالت "Khat/Jomle (Line)"
+            # --- منطق اصلی برای کادکشی، ترجمه، و آماده‌سازی list_of_segments_for_rendering ---
+            if level_to_draw == 4: # حالت "Khat/Jomle (Line)" (تقسیم‌بندی دستی)
                 df_words_for_segmentation = df_ocr_processed[df_ocr_processed['level'] == 5].copy()
+                temp_translated_list_for_textbox = []
                 if not df_words_for_segmentation.empty:
-                    manually_segmented_lines = self._manually_segment_lines(df_words_for_segmentation)
-                    temp_translated_list_for_textbox = []
-                    for line_of_word_series in manually_segmented_lines:
+                    manually_segmented_lines_data = manually_segment_lines( # از ocr_utils
+                        df_words_for_segmentation,
+                        y_tolerance_factor=DEFAULT_Y_TOLERANCE_FACTOR_MANUAL_LINES
+                    )
+                    for line_of_word_series in manually_segmented_lines_data:
                         if not line_of_word_series: continue
                         min_x = min(int(s['left']) for s in line_of_word_series)
                         min_y = min(int(s['top']) for s in line_of_word_series)
@@ -478,8 +300,8 @@ class OCRTranslatorApp:
 
                         if max_x_coord <= min_x or max_y_coord <= min_y: continue
 
-                        current_rect = (min_x, min_y, max_x_coord - min_x, max_y_coord - min_y) # (x,y,w,h)
-                        current_box_color = (34,139,34) # ForestGreen for lines
+                        current_rect = (min_x, min_y, max_x_coord - min_x, max_y_coord - min_y)
+                        current_box_color = (34,139,34)
                         cv.rectangle(image_with_annotations_cv, (min_x, min_y), (max_x_coord, max_y_coord), current_box_color, 2)
 
                         line_text_original = " ".join(str(s['text']).strip() for s in line_of_word_series if str(s['text']).strip())
@@ -493,32 +315,34 @@ class OCRTranslatorApp:
                                 current_segment_for_textbox = translated_line
 
                             if current_font_for_drawing and text_to_show_on_image.strip():
-                                image_with_annotations_cv = self._draw_text_on_cv_image(
+                                image_with_annotations_cv = draw_text_on_cv_image( # از drawing_utils
                                     image_with_annotations_cv, text_to_show_on_image,
                                     min_x, min_y, current_font_for_drawing
                                 )
 
                         list_of_segments_for_rendering.append({
                             'rect': current_rect, 'text_on_image': text_to_show_on_image,
-                            'draw_text': True, 'color': current_box_color
+                            'draw_text': True, 'color': current_box_color,
+                            # ذخیره مختصات اصلی برای _rerender_image_annotations
+                            'base_x': min_x, 'base_y_box_top': min_y
                         })
                         temp_translated_list_for_textbox.append(current_segment_for_textbox)
-                    translated_output_for_widget = "\n".join(temp_translated_list_for_textbox)
-                # Fallback translation
-                elif should_translate and current_target_lang_code != 'en':
+                    if temp_translated_list_for_textbox : translated_output_for_widget = "\n".join(temp_translated_list_for_textbox)
+
+                # اگر در حالت خط دستی، خطی پیدا نشد یا کلمه‌ای برای تقسیم‌بندی نبود
+                # و ترجمه فعال است، کل متن OCR شده را ترجمه کن
+                if not temp_translated_list_for_textbox and should_translate and current_target_lang_code != 'en':
                     if ocr_display_text.strip(): translated_output_for_widget = translate_en_to_fa_api(ocr_display_text, target_lang=current_target_lang_code)
-                    else: translated_output_for_widget = "[متنی برای ترجمه یافت نشد]"
-                else: translated_output_for_widget = ocr_display_text
+                    elif not translated_output_for_widget: translated_output_for_widget = "[متنی برای ترجمه یافت نشد]"
 
             elif level_to_draw == 5: # حالت "Kalame (Word)"
-                words_to_process = df_ocr_processed[(df_ocr_processed['level'] == 5) & (df_ocr_processed['conf'] > 10)].copy()
+                words_to_process = df_ocr_processed[(df_ocr_processed['level'] == 5) & (df_ocr_processed['conf'] > WORD_CONFIDENCE_THRESHOLD)].copy()
                 temp_textbox_lines_dict = {}
-                current_box_color = (0,0,255) # Blue for words
+                current_box_color = (0,0,255)
 
                 for _, word_row in words_to_process.iterrows():
                     original_word = str(word_row['text']).strip()
-                    if not original_word or not (int(word_row['width']) > 0 and int(word_row['height']) > 0):
-                        continue
+                    if not original_word or not (int(word_row['width']) > 0 and int(word_row['height']) > 0): continue
 
                     x,y,w,h = int(word_row['left']),int(word_row['top']),int(word_row['width']),int(word_row['height'])
                     current_rect = (x,y,w,h)
@@ -529,18 +353,20 @@ class OCRTranslatorApp:
 
                     if should_translate and current_target_lang_code != 'en':
                         translated_word = translate_en_to_fa_api(original_word, target_lang=current_target_lang_code)
+                        # اگر ترجمه خالی بود یا فقط فاصله بود، از اصلی استفاده کن
                         text_to_show_on_image = translated_word if translated_word and translated_word.strip() else original_word
                         current_word_for_textbox = translated_word if translated_word and translated_word.strip() else original_word
 
                     if current_font_for_drawing and text_to_show_on_image.strip():
-                        image_with_annotations_cv = self._draw_text_on_cv_image(
+                        image_with_annotations_cv = draw_text_on_cv_image(
                             image_with_annotations_cv, text_to_show_on_image,
                             x, y, current_font_for_drawing, padding_above_box=1
                         )
 
                     list_of_segments_for_rendering.append({
                         'rect': current_rect, 'text_on_image': text_to_show_on_image,
-                        'draw_text': True, 'color': current_box_color
+                        'draw_text': True, 'color': current_box_color,
+                        'base_x': x, 'base_y_box_top': y
                     })
 
                     line_key = (word_row['page_num'], word_row['block_num'], word_row['par_num'], word_row['line_num'])
@@ -551,10 +377,10 @@ class OCRTranslatorApp:
                 final_textbox_lines = [" ".join(item['text'] for item in sorted(temp_textbox_lines_dict[key], key=lambda i: i['word_num'])) for key in sorted_line_keys]
                 translated_output_for_widget = "\n".join(final_textbox_lines)
 
-            else: # برای سایر سطوح (پاراگراف، بلوک) یا عدم کادکشی
-                if level_to_draw > 0 and not df_ocr_processed.empty:
+            else: # سایر سطوح (پاراگراف، بلوک) یا عدم کادکشی (level_to_draw == 0 یا 2 یا 3)
+                if level_to_draw > 0 and not df_ocr_processed.empty: # فقط کادرها
                     elements_to_draw = df_ocr_processed[df_ocr_processed['level'] == level_to_draw]
-                    color_map = {3: (255,165,0), 2: (128,0,128)} # رنگ برای پاراگراف و بلوک
+                    color_map = {3: (255,165,0), 2: (128,0,128)}
                     current_box_color = color_map.get(level_to_draw, (200,200,200))
                     for _, ocr_element in elements_to_draw.iterrows():
                         if int(ocr_element['width']) > 0 and int(ocr_element['height']) > 0 :
@@ -562,37 +388,52 @@ class OCRTranslatorApp:
                             current_rect = (x,y,w,h)
                             cv.rectangle(image_with_annotations_cv, (x, y), (x + w, y + h), current_box_color, 2)
                             list_of_segments_for_rendering.append({
-                                'rect': current_rect, 'text_on_image': "", # متنی روی تصویر برای این سطوح نمی‌نویسیم
-                                'draw_text': False, 'color': current_box_color
+                                'rect': current_rect, 'text_on_image': "",
+                                'draw_text': False, 'color': current_box_color,
+                                'base_x': x, 'base_y_box_top': y
                             })
 
+                # منطق متن برای جعبه پایینی در این حالت‌ها
                 if should_translate and current_target_lang_code != 'en':
                     if ocr_display_text.strip(): translated_output_for_widget = translate_en_to_fa_api(ocr_display_text, target_lang=current_target_lang_code)
                     else: translated_output_for_widget = "[متنی برای ترجمه وجود ندارد]"
-                else: translated_output_for_widget = ocr_display_text
+                # اگر ترجمه خاموش است، translated_output_for_widget از قبل ocr_display_text است.
+
+            # اگر پس از تمام بررسی‌ها، translated_output_for_widget هنوز مقدار پیش‌فرض (ocr_display_text) را دارد
+            # و ترجمه باید انجام می‌شد اما هیچ شرط خاصی آن را پر نکرد، اینجا کل متن را ترجمه می‌کنیم.
+            # این حالت بیشتر برای level_to_draw == 0 (عدم کادکشی) یا سطوح 2 و 3 است.
+            if translated_output_for_widget == ocr_display_text and should_translate and current_target_lang_code != 'en':
+                 if ocr_display_text.strip():
+                     translated_output_for_widget = translate_en_to_fa_api(ocr_display_text, target_lang=current_target_lang_code)
+                 else:
+                     translated_output_for_widget = "[متنی برای ترجمه نبود]"
+
 
             self.master.after(0, self.update_translated_text_widget, translated_output_for_widget.strip())
 
-            final_image_to_show_pil = pl.Image.fromarray(cv.cvtColor(image_with_annotations_cv, cv.COLOR_BGR2RGB))
-            resized_pil_image = self._resize_image_for_tk(final_image_to_show_pil, self.image_container)
+            final_image_to_show_pil = Image.fromarray(cv.cvtColor(image_with_annotations_cv, cv.COLOR_BGR2RGB))
+
+            container_width = self.image_container.winfo_width()
+            container_height = self.image_container.winfo_height()
+            resized_pil_image = resize_pil_image_for_tk(final_image_to_show_pil, container_width, container_height)
+
             self.master.after(0, self.update_image_display, resized_pil_image)
 
-            # --- ذخیره نتایج و تنظیمات فعلی برای استفاده در بازترسیمی ---
-            self.last_img_cv_original = img_cv_original.copy() # ذخیره کپی از تصویر اصلی
-            self.last_df_ocr_processed = df_ocr_processed.copy() if df_ocr_processed is not None else None
-            self.last_render_segments = list_of_segments_for_rendering # این شامل اطلاعات کادر و متن روی تصویر است
+            # --- ذخیره نتایج و تنظیمات فعلی ---
+            self.last_img_cv_original = img_cv_original.copy()
+            self.last_pil_original = img_pil_original.copy()
+            self.last_df_ocr_processed = df_ocr_processed.copy() if df_ocr_processed is not None and not df_ocr_processed.empty else None
+            self.last_render_segments = list_of_segments_for_rendering
             self.last_ocr_display_text = ocr_display_text
             self.last_translated_output_for_widget = translated_output_for_widget
 
-            # به‌روزرسانی تنظیمات قبلی پس از پردازش موفق
             self.prev_font_size = self.font_size_var.get()
             self.prev_language_name = self.selected_language_name.get()
             self.prev_translate_enabled = self.translate_checkbox_var.get()
             self.prev_draw_level = self.selected_draw_level_name.get()
-            # --- پایان ذخیره‌سازی ---
 
         except ValueError as ve:
-            print(f"ValueError در process_image: {ve}") # ادامه خطاها مثل قبل
+            print(f"ValueError در process_image: {ve}")
             self.master.after(0, lambda: messagebox.showerror("خطای ورودی/مقدار", f"{ve}"))
         except pytesseract.TesseractError as tess_err:
             print(f"TesseractError در process_image: {tess_err}")
@@ -603,56 +444,6 @@ class OCRTranslatorApp:
             self.master.after(0, lambda: messagebox.showerror("خطای کلی در پردازش", f"یک خطای پیش‌بینی نشده رخ داد: {e}"))
         finally:
             self.master.after(0, self.stop_loading_and_update_status)
-
-    def _draw_text_on_cv_image(self, cv_image_input, text_to_write,
-                               base_x, base_y_of_box_top,
-                               font_object,
-                               text_color=(250,250,250), outline_color=(0,0,0),
-                               padding_above_box=3):
-        """
-        متن را با فونت و حاشیه مشخص شده روی تصویر OpenCV (ورودی) می‌نویسد.
-        base_y_of_box_top: مختصات Y بالای کادری است که متن باید بالای آن نوشته شود.
-        خروجی: تصویر OpenCV با متن نوشته شده روی آن.
-        """
-        if not text_to_write or font_object is None:
-            return cv_image_input # اگر متنی برای نوشتن نیست یا فونت موجود نیست، تصویر اصلی را برگردان
-
-        try:
-            # تبدیل تصویر OpenCV به PIL برای نوشتن متن
-            pil_img_for_text_draw = pl.Image.fromarray(cv.cvtColor(cv_image_input, cv.COLOR_BGR2RGB))
-            draw_on_pil = pl.ImageDraw.Draw(pil_img_for_text_draw)
-
-            # محاسبه اندازه متن و موقعیت دقیق
-            try: # textbbox برای Pillow مدرن
-                text_bbox = draw_on_pil.textbbox((0,0), text_to_write, font=font_object)
-                text_height = text_bbox[3] - text_bbox[0] # ارتفاع واقعی متن ارائه شده توسط فونت
-            except AttributeError: # Fallback برای Pillow قدیمی‌تر
-                text_size = draw_on_pil.textsize(text_to_write, font=font_object)
-                text_height = text_size[1]
-
-            text_x_position = base_x
-            text_y_position = base_y_of_box_top - text_height - padding_above_box
-
-            # اگر متن از بالای تصویر بیرون زد، آن را کمی پایین‌تر (داخل یا لبه بالایی کادر) قرار بده
-            if text_y_position < 0:
-                text_y_position = base_y_of_box_top + padding_above_box
-
-            # کشیدن حاشیه (outline)
-            outline_thickness = max(1, font_object.size // 15) # ضخامت حاشیه متناسب با اندازه فونت
-            for dx_o in range(-outline_thickness, outline_thickness + 1):
-                for dy_o in range(-outline_thickness, outline_thickness + 1):
-                    if dx_o != 0 or dy_o != 0: # خود متن اصلی را به عنوان حاشیه نکش
-                        draw_on_pil.text((text_x_position + dx_o, text_y_position + dy_o),
-                                         text_to_write, font=font_object, fill=outline_color)
-            # کشیدن متن اصلی
-            draw_on_pil.text((text_x_position, text_y_position), text_to_write,
-                             font=font_object, fill=text_color)
-
-            # تبدیل بازگشت به فرمت OpenCV
-            return cv.cvtColor(np.array(pil_img_for_text_draw), cv.COLOR_RGB2BGR)
-        except Exception as draw_err:
-            print(f"خطا در نوشتن متن '{text_to_write[:20]}...' روی تصویر: {draw_err}")
-            return cv_image_input # در صورت خطا، تصویر ورودی را برگردان
 
     def update_image_display(self, img_pil):
         try:
@@ -679,7 +470,6 @@ class OCRTranslatorApp:
         self.progress_bar.stop()
         self.progress_bar.pack_forget()
         self.status_label.config(text="Amadeh")
-
 
 if __name__ == "__main__":
     root = Tk()
