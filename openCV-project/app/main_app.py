@@ -22,14 +22,13 @@ from config import (FONT_PATH, GLOBAL_FONT_DEFAULT_SIZE, LANGUAGE_OPTIONS,
                     ADAPTIVE_THRESHOLD_BLOCK_SIZE_DEFAULT,
                     ADAPTIVE_THRESHOLD_C_DEFAULT)
 from ocr_utils import (get_structured_ocr_data,
-                       extract_ocr_text_for_display, manually_segment_lines)
+                       extract_ocr_text_for_display) # manually_segment_lines دیگر برای نمایش نهایی خطوط استفاده نمی‌شود
 from drawing_utils import draw_text_on_cv_image, resize_pil_image_for_tk
 
 import warnings
 warnings.filterwarnings("ignore")
 
 global_font_instance_check = None
-# ... (بخش بررسی فونت مثل قبل) ...
 try:
     if FONT_PATH and FONT_PATH.strip() != "":
         global_font_instance_check = ImageFont.truetype(FONT_PATH, GLOBAL_FONT_DEFAULT_SIZE)
@@ -45,7 +44,7 @@ class OCRTranslatorApp:
     def __init__(self, master):
         self.master = master
         master.title("OCR Text Translator")
-        master.geometry("1200x880") # ارتفاع کمی بیشتر برای منوی PSM
+        master.geometry("1200x880")
 
         self.current_image_path = None
         self.translated_image_tk = None
@@ -86,11 +85,9 @@ class OCRTranslatorApp:
         self.adaptive_block_size_var = StringVar(master, value=str(ADAPTIVE_THRESHOLD_BLOCK_SIZE_DEFAULT))
         self.adaptive_c_var = StringVar(master, value=str(ADAPTIVE_THRESHOLD_C_DEFAULT))
 
-        # متغیر و گزینه‌های PSM
         self.psm_options_ui_map = PSM_OPTIONS
         self.selected_psm_config_str = StringVar(master)
-        # پیدا کردن کلید مربوط به مقدار DEFAULT_OCR_PSM_CONFIG برای نمایش اولیه
-        initial_psm_key = DEFAULT_OCR_PSM_CONFIG # مقدار پیش‌فرض اگر کلید پیدا نشود
+        initial_psm_key = DEFAULT_OCR_PSM_CONFIG
         for key, val_str in self.psm_options_ui_map.items():
             if val_str == DEFAULT_OCR_PSM_CONFIG:
                 initial_psm_key = key
@@ -102,7 +99,7 @@ class OCRTranslatorApp:
         self.control_frame_top = ttk.Frame(master, padding="5")
         self.control_frame_top.pack(side="top", fill="x")
 
-        self.control_frame_middle = ttk.Frame(master, padding="5") # فریم جدید برای پارامترهای بیشتر
+        self.control_frame_middle = ttk.Frame(master, padding="5")
         self.control_frame_middle.pack(side="top", fill="x")
 
         self.control_frame_bottom = ttk.Frame(master, padding="5")
@@ -111,7 +108,6 @@ class OCRTranslatorApp:
         self.control_frame_debug_views = ttk.Frame(master, padding="5")
         self.control_frame_debug_views.pack(side="top", fill="x")
 
-        # ردیف اول کنترل‌ها (Top)
         self.select_button = Button(self.control_frame_top, text="Entekhab Tasvir", command=self.select_image)
         self.select_button.pack(side="left", padx=5, pady=5)
 
@@ -128,7 +124,6 @@ class OCRTranslatorApp:
         self.exit_button = Button(self.control_frame_top, text="Khorooj", command=master.quit)
         self.exit_button.pack(side="right", padx=5, pady=5)
 
-        # ردیف دوم کنترل‌ها (Middle)
         ttk.Label(self.control_frame_middle, text="Kadr Dore:").pack(side="left", padx=(0,2), pady=5)
         self.draw_level_menu = OptionMenu(self.control_frame_middle, self.selected_draw_level_name, *self.draw_level_options.keys())
         self.draw_level_menu.pack(side="left", padx=5, pady=5)
@@ -141,13 +136,10 @@ class OCRTranslatorApp:
         self.word_confidence_entry = Entry(self.control_frame_middle, textvariable=self.word_confidence_threshold_var, width=5)
         self.word_confidence_entry.pack(side="left", padx=5, pady=5)
 
-        # منوی انتخاب PSM
         ttk.Label(self.control_frame_middle, text="OCR PSM Mode:").pack(side="left", padx=(10,2), pady=5)
         self.psm_menu = OptionMenu(self.control_frame_middle, self.selected_psm_config_str, self.selected_psm_config_str.get(), *self.psm_options_ui_map.keys())
         self.psm_menu.pack(side="left", padx=5, pady=5)
 
-
-        # ردیف سوم کنترل‌ها (Bottom) - پارامترهای پیش‌پردازش
         ttk.Label(self.control_frame_bottom, text="Gaussian Kernel (odd):").pack(side="left", padx=(0, 2), pady=5)
         self.gaussian_kernel_entry = Entry(self.control_frame_bottom, textvariable=self.gaussian_kernel_var, width=5)
         self.gaussian_kernel_entry.pack(side="left", padx=5, pady=5)
@@ -160,9 +152,7 @@ class OCRTranslatorApp:
         self.adaptive_c_entry = Entry(self.control_frame_bottom, textvariable=self.adaptive_c_var, width=5)
         self.adaptive_c_entry.pack(side="left", padx=5, pady=5)
 
-        # دکمه‌های نمایش مراحل پیش‌پردازش (Debug Views)
         ttk.Label(self.control_frame_debug_views, text="Namayesh Marhale Pishpardazesh:").pack(side="left", padx=(0, 5), pady=5)
-        # ... (دکمه‌های debug مثل قبل) ...
         self.show_original_button = Button(self.control_frame_debug_views, text="Asli (RGB)", command=self.show_original_image_debug)
         self.show_original_button.pack(side="left", padx=2, pady=5)
         self.show_grayscale_button = Button(self.control_frame_debug_views, text="Khakestari", command=self.show_grayscale_image_debug)
@@ -176,7 +166,6 @@ class OCRTranslatorApp:
 
         self.main_content_frame = ttk.Frame(master, padding="10")
         self.main_content_frame.pack(side="top", fill="both", expand=True)
-        # ... (بقیه UI مثل قبل: image_container, text_boxes_frame, status_frame) ...
         self.main_content_frame.grid_columnconfigure(0, weight=1)
         self.main_content_frame.grid_columnconfigure(1, weight=1)
         self.main_content_frame.grid_rowconfigure(0, weight=1)
@@ -205,7 +194,6 @@ class OCRTranslatorApp:
         self.status_label.pack(side="left", padx=10)
 
 
-    # ... (توابع _display_cv_image_in_label, show_..._debug, apply_settings_and_process, select_image, _load_current_font, _load_images_from_path مثل قبل) ...
     def _display_cv_image_in_label(self, cv_img, conversion_code=None):
         if cv_img is None:
             messagebox.showinfo("Etela", "Tasviri baraye namayesh dar in marhale vojood nadarad. Lotfan avval 'Amal va Pardazesh' ra anjam dahid.")
@@ -331,14 +319,11 @@ class OCRTranslatorApp:
                 return
 
             current_font_for_drawing = self._load_current_font()
-            # ... (بقیه بخش خواندن فونت مثل قبل) ...
             if current_font_for_drawing is None and global_font_instance_check :
                  current_font_for_drawing = ImageFont.truetype(FONT_PATH, GLOBAL_FONT_DEFAULT_SIZE)
             elif current_font_for_drawing is None:
                 print("Hoshdar: Font baraye neveshtan rooye tasvir bargozari nashod.")
 
-            # خواندن مقادیر پیش‌پردازش از UI
-            # ... (مثل قبل) ...
             try:
                 g_kernel = int(self.gaussian_kernel_var.get())
                 if g_kernel < 1 : g_kernel = 1
@@ -370,13 +355,9 @@ class OCRTranslatorApp:
                 word_confidence_threshold = WORD_CONFIDENCE_THRESHOLD_DEFAULT
                 self.master.after(0, lambda: self.word_confidence_threshold_var.set(str(WORD_CONFIDENCE_THRESHOLD_DEFAULT)))
 
-            # خواندن مقدار PSM انتخاب شده از UI
             selected_psm_key = self.selected_psm_config_str.get()
             current_psm_config = self.psm_options_ui_map.get(selected_psm_key, DEFAULT_OCR_PSM_CONFIG)
 
-
-            # --- شروع مراحل پیش‌پردازش و ذخیره برای Debug ---
-            # ... (مثل قبل) ...
             img_cv_to_process = self.last_img_cv_original.copy()
             if len(img_cv_to_process.shape) == 3 and img_cv_to_process.shape[2] == 3:
                 self._current_cv_grayscale = cv.cvtColor(img_cv_to_process, cv.COLOR_BGR2GRAY)
@@ -392,12 +373,10 @@ class OCRTranslatorApp:
             self.img_cv_binary_debug = self._current_cv_binary.copy()
             ocr_input_for_df = self._current_cv_binary
 
-            # استفاده از current_psm_config به جای DEFAULT_OCR_PSM_CONFIG
             df_ocr_processed = get_structured_ocr_data(ocr_input_for_df,
                                                        lang=DEFAULT_OCR_LANG,
-                                                       psm_config=current_psm_config) # تغییر اینجا
+                                                       psm_config=current_psm_config)
 
-            # ... (بقیه تابع process_image مثل قبل، شامل نمایش تصویر OCR شده حین ترجمه، و منطق اصلی کادکشی و ترجمه) ...
             ocr_display_text = extract_ocr_text_for_display(df_ocr_processed)
             self.master.after(0, self.update_ocr_text_widget, ocr_display_text)
 
@@ -411,98 +390,81 @@ class OCRTranslatorApp:
 
             image_with_annotations_cv = self.last_img_cv_original.copy()
 
-            if should_translate and current_target_lang_code != 'en' and level_to_draw > 0 :
-                temp_image_for_ocr_display = self.last_img_cv_original.copy()
-                ocr_box_color = (0,255,255)
 
-                if level_to_draw == 5:
-                    words_for_ocr_display = df_ocr_processed[(df_ocr_processed['level'] == 5) & (df_ocr_processed['conf'] > word_confidence_threshold)].copy()
-                    for _, word_row in words_for_ocr_display.iterrows():
-                        original_word = str(word_row['text']).strip()
-                        if not original_word or not (int(word_row['width']) > 0 and int(word_row['height']) > 0): continue
-                        x,y,w,h = int(word_row['left']),int(word_row['top']),int(word_row['width']),int(word_row['height'])
-                        cv.rectangle(temp_image_for_ocr_display, (x, y), (x + w, y + h), ocr_box_color, 1)
-                        if current_font_for_drawing and original_word.strip():
-                            temp_image_for_ocr_display = draw_text_on_cv_image(
-                                temp_image_for_ocr_display, original_word, x, y, current_font_for_drawing, padding_above_box=1, text_color=(50,50,50)
-                            )
-                elif level_to_draw == 4:
-                    df_words_seg = df_ocr_processed[df_ocr_processed['level'] == 5].copy()
-                    if not df_words_seg.empty:
-                        man_lines_data = manually_segment_lines(df_words_seg, DEFAULT_Y_TOLERANCE_FACTOR_MANUAL_LINES)
-                        for line_series in man_lines_data:
-                            if not line_series: continue
-                            min_x_s = min(int(s['left']) for s in line_series) # Renamed variable
-                            min_y_s = min(int(s['top']) for s in line_series) # Renamed variable
-                            max_x_c_s = max(int(s['left']) + int(s['width']) for s in line_series) # Renamed variable
-                            max_y_c_s = max(int(s['top']) + int(s['height']) for s in line_series) # Renamed variable
-                            line_text_orig = " ".join(str(s['text']).strip() for s in line_series if str(s['text']).strip())
-                            cv.rectangle(temp_image_for_ocr_display, (min_x_s, min_y_s), (max_x_c_s, max_y_c_s), ocr_box_color, 2)
-                            if current_font_for_drawing and line_text_orig.strip():
-                                temp_image_for_ocr_display = draw_text_on_cv_image(
-                                    temp_image_for_ocr_display, line_text_orig, min_x_s, min_y_s, current_font_for_drawing, text_color=(50,50,50)
-                                )
-
-                final_image_to_show_pil_ocr = Image.fromarray(cv.cvtColor(temp_image_for_ocr_display, cv.COLOR_BGR2RGB))
-                container_width = self.image_container.winfo_width()
-                container_height = self.image_container.winfo_height()
-                resized_pil_image_ocr = resize_pil_image_for_tk(final_image_to_show_pil_ocr, container_width, container_height)
-                self.master.after(0, self.update_image_display, resized_pil_image_ocr)
-                self.master.after(0, lambda: self.status_label.config(text="Darkhast tarjome..."))
-
-
-            if level_to_draw == 4:
-                df_words_for_segmentation = df_ocr_processed[df_ocr_processed['level'] == 5].copy()
+            if level_to_draw == 4: # حالت نمایش خط (با استفاده از ساختار خطوط Tesseract و اعمال دقت کلمه)
                 temp_translated_list_for_textbox = []
-                if not df_words_for_segmentation.empty:
-                    manually_segmented_lines_data = manually_segment_lines(
-                        df_words_for_segmentation,
-                        y_tolerance_factor=DEFAULT_Y_TOLERANCE_FACTOR_MANUAL_LINES
-                    )
-                    for line_of_word_series in manually_segmented_lines_data:
-                        if not line_of_word_series: continue
-                        min_x = min(int(s['left']) for s in line_of_word_series)
-                        min_y = min(int(s['top']) for s in line_of_word_series)
-                        max_x_coord = max(int(s['left']) + int(s['width']) for s in line_of_word_series)
-                        max_y_coord = max(int(s['top']) + int(s['height']) for s in line_of_word_series)
+                if df_ocr_processed is not None and not df_ocr_processed.empty:
+                    # ابتدا تمام کلمات سطح 5 را استخراج می‌کنیم
+                    df_all_words_level5 = df_ocr_processed[df_ocr_processed['level'] == 5].copy()
+                    # سپس کلمات را بر اساس آستانه دقت فیلتر می‌کنیم
+                    df_confident_words = df_all_words_level5[df_all_words_level5['conf'] > word_confidence_threshold].copy()
 
-                        if max_x_coord <= min_x or max_y_coord <= min_y: continue
+                    if not df_confident_words.empty:
+                        # خطوط را از کلمات با دقت بالا گروه‌بندی می‌کنیم
+                        grouped_lines_ocr = df_confident_words.groupby(
+                            ['page_num', 'block_num', 'par_num', 'line_num'], sort=True
+                        )
+                        for _, line_words_df in grouped_lines_ocr:
+                            current_line_words_sorted = line_words_df.sort_values(by='word_num')
+                            if current_line_words_sorted.empty:
+                                continue
 
-                        current_rect = (min_x, min_y, max_x_coord - min_x, max_y_coord - min_y)
-                        current_box_color = (34,139,34)
-                        cv.rectangle(image_with_annotations_cv, (min_x, min_y), (max_x_coord, max_y_coord), current_box_color, 2)
+                            min_x = int(current_line_words_sorted['left'].min())
+                            min_y = int(current_line_words_sorted['top'].min())
+                            max_x_coord = int((current_line_words_sorted['left'] + current_line_words_sorted['width']).max())
+                            max_y_coord = int((current_line_words_sorted['top'] + current_line_words_sorted['height']).max())
 
-                        line_text_original = " ".join(str(s['text']).strip() for s in line_of_word_series if str(s['text']).strip())
-                        text_to_show_on_image = line_text_original
-                        current_segment_for_textbox = line_text_original
+                            if max_x_coord <= min_x or max_y_coord <= min_y: continue
 
-                        if line_text_original.strip():
-                            if should_translate and current_target_lang_code != 'en':
-                                translated_line = translate_en_to_fa_api(line_text_original, target_lang=current_target_lang_code)
-                                text_to_show_on_image = translated_line
-                                current_segment_for_textbox = translated_line
+                            current_rect = (min_x, min_y, max_x_coord - min_x, max_y_coord - min_y)
+                            current_box_color = (34,139,34) # سبز برای خط
+                            cv.rectangle(image_with_annotations_cv, (min_x, min_y), (max_x_coord, max_y_coord), current_box_color, 2)
 
-                            if current_font_for_drawing and text_to_show_on_image.strip():
-                                image_with_annotations_cv = draw_text_on_cv_image(
-                                    image_with_annotations_cv, text_to_show_on_image,
-                                    min_x, min_y, current_font_for_drawing
-                                )
-                        list_of_segments_for_rendering.append({
-                            'rect': current_rect, 'text_on_image': text_to_show_on_image,
-                            'draw_text': True, 'color': current_box_color,
-                            'base_x': min_x, 'base_y_box_top': min_y
-                        })
-                        temp_translated_list_for_textbox.append(current_segment_for_textbox)
-                    if temp_translated_list_for_textbox : translated_output_for_widget = "\n".join(temp_translated_list_for_textbox)
+                            line_text_original = " ".join(current_line_words_sorted['text'].astype(str).str.strip().tolist())
+                            text_to_show_on_image = line_text_original
+                            current_segment_for_textbox = line_text_original
 
-                if not temp_translated_list_for_textbox and should_translate and current_target_lang_code != 'en':
+                            if line_text_original.strip():
+                                if should_translate and current_target_lang_code != 'en':
+                                    translated_line = translate_en_to_fa_api(line_text_original, target_lang=current_target_lang_code)
+                                    text_to_show_on_image = translated_line
+                                    current_segment_for_textbox = translated_line
+
+                                if current_font_for_drawing and text_to_show_on_image.strip():
+                                    image_with_annotations_cv = draw_text_on_cv_image(
+                                        image_with_annotations_cv, text_to_show_on_image,
+                                        min_x, min_y, current_font_for_drawing
+                                    )
+                            list_of_segments_for_rendering.append({
+                                'rect': current_rect, 'text_on_image': text_to_show_on_image,
+                                'draw_text': True, 'color': current_box_color,
+                                'base_x': min_x, 'base_y_box_top': min_y
+                            })
+                            temp_translated_list_for_textbox.append(current_segment_for_textbox)
+
+                        if temp_translated_list_for_textbox :
+                            translated_output_for_widget = "\n".join(temp_translated_list_for_textbox)
+                        elif not temp_translated_list_for_textbox and should_translate and current_target_lang_code != 'en':
+                             if ocr_display_text.strip():
+                                 translated_output_for_widget = translate_en_to_fa_api(ocr_display_text, target_lang=current_target_lang_code)
+                             elif not translated_output_for_widget:
+                                 translated_output_for_widget = "[Matni baraye tarjome yaft nashod]"
+                    # اگر هیچ کلمه با دقتی یافت نشد، اما ترجمه فعال است
+                    elif should_translate and current_target_lang_code != 'en':
+                        if ocr_display_text.strip():
+                            translated_output_for_widget = translate_en_to_fa_api(ocr_display_text, target_lang=current_target_lang_code)
+                        else:
+                            translated_output_for_widget = "[Matni baraye tarjome yaft nashod]"
+                # اگر اصلا OCR ای نبود ولی ترجمه فعال بود
+                elif should_translate and current_target_lang_code != 'en':
                     if ocr_display_text.strip(): translated_output_for_widget = translate_en_to_fa_api(ocr_display_text, target_lang=current_target_lang_code)
                     elif not translated_output_for_widget: translated_output_for_widget = "[Matni baraye tarjome yaft nashod]"
 
-            elif level_to_draw == 5:
+
+            elif level_to_draw == 5: # حالت نمایش کلمه (دقت کلمه اینجا اعمال می‌شود)
                 words_to_process = df_ocr_processed[(df_ocr_processed['level'] == 5) & (df_ocr_processed['conf'] > word_confidence_threshold)].copy()
                 temp_textbox_lines_dict = {}
-                current_box_color = (0,0,255)
+                current_box_color = (0,0,255) # آبی برای کلمه
 
                 for _, word_row in words_to_process.iterrows():
                     original_word = str(word_row['text']).strip()
@@ -538,10 +500,11 @@ class OCRTranslatorApp:
                 final_textbox_lines = [" ".join(item['text'] for item in sorted(temp_textbox_lines_dict[key], key=lambda i: i['word_num'])) for key in sorted_line_keys]
                 translated_output_for_widget = "\n".join(final_textbox_lines)
 
-            else:
-                if level_to_draw > 0 and not df_ocr_processed.empty:
+            else: # سایر سطوح (پارگراف، بلوک) یا بدون کادر
+                if level_to_draw > 0 and df_ocr_processed is not None and not df_ocr_processed.empty:
+                    # برای سطوح پاراگراف و بلوک، دقت کلمه اعمال نمی‌کنیم، چون اینها ساختارهای بزرگتری هستند
                     elements_to_draw = df_ocr_processed[df_ocr_processed['level'] == level_to_draw]
-                    color_map = {3: (255,165,0), 2: (128,0,128)}
+                    color_map = {3: (255,165,0), 2: (128,0,128)} # نارنجی برای پاراگراف، بنفش برای بلوک
                     current_box_color = color_map.get(level_to_draw, (200,200,200))
                     for _, ocr_element in elements_to_draw.iterrows():
                         if int(ocr_element['width']) > 0 and int(ocr_element['height']) > 0 :
@@ -553,15 +516,17 @@ class OCRTranslatorApp:
                                 'draw_text': False, 'color': current_box_color,
                                 'base_x': x, 'base_y_box_top': y
                             })
-                if should_translate and current_target_lang_code != 'en':
+                if should_translate and current_target_lang_code != 'en' and translated_output_for_widget == ocr_display_text:
                     if ocr_display_text.strip(): translated_output_for_widget = translate_en_to_fa_api(ocr_display_text, target_lang=current_target_lang_code)
                     else: translated_output_for_widget = "[Matni baraye tarjome vojud nadarad]"
+
 
             if translated_output_for_widget == ocr_display_text and should_translate and current_target_lang_code != 'en':
                  if ocr_display_text.strip():
                      translated_output_for_widget = translate_en_to_fa_api(ocr_display_text, target_lang=current_target_lang_code)
                  else:
                      translated_output_for_widget = "[Matni baraye tarjome nabood]"
+
 
             self.master.after(0, self.update_translated_text_widget, translated_output_for_widget.strip())
             final_image_to_show_pil = Image.fromarray(cv.cvtColor(image_with_annotations_cv, cv.COLOR_BGR2RGB))
@@ -589,7 +554,6 @@ class OCRTranslatorApp:
             self.master.after(0, self.stop_loading_and_update_status)
 
     def update_image_display(self, img_pil):
-        # ... (مثل قبل) ...
         if img_pil is None:
             return
         try:
@@ -601,21 +565,18 @@ class OCRTranslatorApp:
             traceback.print_exc()
 
     def update_ocr_text_widget(self, text):
-        # ... (مثل قبل) ...
         self.ocr_text_widget.config(state='normal')
         self.ocr_text_widget.delete('1.0', 'end')
         self.ocr_text_widget.insert('1.0', text)
         self.ocr_text_widget.config(state='disabled')
 
     def update_translated_text_widget(self, text):
-        # ... (مثل قبل) ...
         self.translated_text_widget.config(state='normal')
         self.translated_text_widget.delete('1.0', 'end')
         self.translated_text_widget.insert('1.0', text)
         self.translated_text_widget.config(state='disabled')
 
     def stop_loading_and_update_status(self):
-        # ... (مثل قبل) ...
         self.progress_bar.stop()
         self.progress_bar.pack_forget()
         if not self.current_image_path:
