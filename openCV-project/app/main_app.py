@@ -159,7 +159,7 @@ class OCRTranslatorApp:
             self.progress_bar.start()
             threading.Thread(target=self._rerender_image_annotations, daemon=True).start()
         else:
-            self.status_label.config(text="در حال پردازش مجدد...")
+            self.status_label.config(text="pardazesh mojadad...")
             if not self.progress_bar.winfo_ismapped(): self.progress_bar.pack(side="left", padx=5)
             self.progress_bar.start()
             threading.Thread(target=self.process_image, args=(self.current_image_path,), daemon=True).start()
