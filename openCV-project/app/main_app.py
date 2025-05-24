@@ -1,65 +1,73 @@
 # main_app.py
 import numpy as np
 import pandas as pd
-# استفاده مستقیم از Image, ImageFont, ImageTk از PIL
 from PIL import Image, ImageFont, ImageTk
 import cv2 as cv
-import pytesseract # برای استفاده از pytesseract.Output
+import pytesseract
 
 import threading
 from tkinter import Tk, Label, Button, filedialog, PhotoImage, StringVar, OptionMenu, Entry, Checkbutton, scrolledtext
 from tkinter import ttk
 from tkinter import messagebox
-# io و csv دیگر مستقیماً در اینجا استفاده نمی‌شوند (به ocr_utils منتقل شده‌اند)
-import traceback # برای چاپ کامل خطاها
+import traceback
 
-# --- ایمپورت توابع از ماژول‌های جدید ---
 from translation_api import translate_en_to_fa_api
 from config import (FONT_PATH, GLOBAL_FONT_DEFAULT_SIZE, LANGUAGE_OPTIONS,
                     MIN_FONT_SIZE, MAX_FONT_SIZE, DEFAULT_OCR_LANG,
                     DEFAULT_OCR_PSM_CONFIG, DEFAULT_Y_TOLERANCE_FACTOR_MANUAL_LINES,
-                    WORD_CONFIDENCE_THRESHOLD) # ثابت‌های جدید از config
-from ocr_utils import (preprocess_image_for_ocr, get_structured_ocr_data,
+                    WORD_CONFIDENCE_THRESHOLD_DEFAULT,
+                    GAUSSIAN_BLUR_KERNEL_SIZE_DEFAULT,
+                    ADAPTIVE_THRESHOLD_BLOCK_SIZE_DEFAULT,
+                    ADAPTIVE_THRESHOLD_C_DEFAULT)
+# ocr_utils.preprocess_image_for_ocr دیگر مستقیما برای گرفتن همه مراحل استفاده نمیشود
+# اما توابع دیگر آن همچنان استفاده میشوند.
+from ocr_utils import (get_structured_ocr_data,
                        extract_ocr_text_for_display, manually_segment_lines)
 from drawing_utils import draw_text_on_cv_image, resize_pil_image_for_tk
-# --- پایان ایمپورت‌ها ---
 
 import warnings
 warnings.filterwarnings("ignore")
 
-# --- بررسی اولیه و سراسری فونت هنگام شروع برنامه ---
 global_font_instance_check = None
 try:
     if FONT_PATH and FONT_PATH.strip() != "":
         global_font_instance_check = ImageFont.truetype(FONT_PATH, GLOBAL_FONT_DEFAULT_SIZE)
     else:
-        print("هشدار جدی: مسیر فونت (FONT_PATH) در config.py تعریف نشده یا خالی است. متن روی تصویر نمایش داده نخواهد شد.")
+        print("Hoshdar جدی: Masir font (FONT_PATH) dar config.py ta'rif nashode ya khali ast...")
 except IOError:
-    print(f"خطای IO هنگام بررسی اولیه فونت از مسیر '{FONT_PATH}'. لطفاً مسیر و دسترسی فایل را بررسی کنید.")
+    print(f"Khataye IO hengam barresi avaliye font az masir '{FONT_PATH}'...")
 except Exception as e:
-    print(f"خطای ناشناخته هنگام بررسی اولیه فونت از مسیر '{FONT_PATH}': {e}")
-# --- پایان بررسی اولیه فونت ---
+    print(f"Khataye nashnakhte hengam barresi avaliye font az masir '{FONT_PATH}': {e}")
+
 
 class OCRTranslatorApp:
     def __init__(self, master):
         self.master = master
         master.title("OCR Text Translator")
-        master.geometry("1200x800")
+        master.geometry("1200x850") # کمی ارتفاع بیشتر برای دکمه‌های جدید
 
         self.current_image_path = None
         self.translated_image_tk = None
 
-        self.last_img_cv_original = None
-        self.last_pil_original = None
+        # تصاویر اصلی
+        self.last_pil_original = None # برای نمایش "Asli"
+        self.last_img_cv_original = None # برای پردازش
+
+        # تصاویر مراحل میانی برای نمایش اشکال‌زدایی (Debug)
+        self.img_cv_grayscale_debug = None
+        self.img_cv_blurred_debug = None
+        self.img_cv_binary_debug = None
+
+        # تصاویر مراحل میانی که در پردازش نهایی استفاده خواهند شد
+        self._current_cv_grayscale = None
+        self._current_cv_blurred = None
+        self._current_cv_binary = None
+
+
         self.last_df_ocr_processed = None
         self.last_render_segments = []
         self.last_ocr_display_text = ""
         self.last_translated_output_for_widget = ""
-
-        self.prev_font_size = str(GLOBAL_FONT_DEFAULT_SIZE)
-        self.prev_language_name = ""
-        self.prev_translate_enabled = "1"
-        self.prev_draw_level = ""
 
         self.selected_language_name = StringVar(master)
         default_lang_key = "Engilisi (English)"
@@ -70,44 +78,90 @@ class OCRTranslatorApp:
 
         self.translate_checkbox_var = StringVar(master, value="1")
         self.font_size_var = StringVar(master, value=str(GLOBAL_FONT_DEFAULT_SIZE))
+        self.word_confidence_threshold_var = StringVar(master, value=str(WORD_CONFIDENCE_THRESHOLD_DEFAULT))
 
         self.selected_draw_level_name = StringVar(master)
         self.draw_level_options = {
-            "Kadr Nakeshid (None)": 0, "Kalame (Word)": 5,
-            "Khat/Jomle (Line)": 4, "Paragraph (Tesseract)": 3,
-            "Block Matn (Tesseract)": 2
+            "Bedoon Kadr (None)": 0, "Kalame (Word)": 5,
+            "Khat (Line)": 4, "Paragraph (Tesseract)": 3,
+            "Block (Tesseract)": 2
         }
-        self.selected_draw_level_name.set("Khat/Jomle (Line)")
+        self.selected_draw_level_name.set("Khat (Line)")
 
-        self.prev_language_name = self.selected_language_name.get()
-        self.prev_draw_level = self.selected_draw_level_name.get()
+        self.gaussian_kernel_var = StringVar(master, value=str(GAUSSIAN_BLUR_KERNEL_SIZE_DEFAULT))
+        self.adaptive_block_size_var = StringVar(master, value=str(ADAPTIVE_THRESHOLD_BLOCK_SIZE_DEFAULT))
+        self.adaptive_c_var = StringVar(master, value=str(ADAPTIVE_THRESHOLD_C_DEFAULT))
 
         # --- UI Elements ---
-        self.control_frame = ttk.Frame(master, padding="10")
-        self.control_frame.pack(side="top", fill="x")
-        # ... (تمام ویجت‌های control_frame مثل قبل اینجا تعریف و pack می‌شوند) ...
-        self.select_button = Button(self.control_frame, text="Entekhab Tasvir", command=self.select_image)
+        self.control_frame_top = ttk.Frame(master, padding="5")
+        self.control_frame_top.pack(side="top", fill="x")
+
+        self.control_frame_bottom = ttk.Frame(master, padding="5")
+        self.control_frame_bottom.pack(side="top", fill="x")
+
+        # فریم جدید برای دکمه‌های نمایش مراحل
+        self.control_frame_debug_views = ttk.Frame(master, padding="5")
+        self.control_frame_debug_views.pack(side="top", fill="x")
+
+
+        self.select_button = Button(self.control_frame_top, text="Entekhab Tasvir", command=self.select_image)
         self.select_button.pack(side="left", padx=5, pady=5)
-        ttk.Label(self.control_frame, text="Zaban Tarjomeh:").pack(side="left", padx=(10, 2), pady=5)
-        self.language_menu = OptionMenu(self.control_frame, self.selected_language_name, *self.language_options.keys())
+
+        self.apply_button = Button(self.control_frame_top, text="Amal va Pardazesh", command=self.apply_settings_and_process)
+        self.apply_button.pack(side="left", padx=10, pady=5)
+
+        ttk.Label(self.control_frame_top, text="Zaban Tarjomeh:").pack(side="left", padx=(10, 2), pady=5)
+        self.language_menu = OptionMenu(self.control_frame_top, self.selected_language_name, *self.language_options.keys())
         self.language_menu.pack(side="left", padx=5, pady=5)
-        self.selected_language_name.trace_add("write", self.on_setting_change)
-        self.translate_checkbox = Checkbutton(self.control_frame, text="Tarjome Kon", variable=self.translate_checkbox_var, onvalue="1", offvalue="0", command=self.on_setting_change)
+
+        self.translate_checkbox = Checkbutton(self.control_frame_top, text="Tarjome Kon", variable=self.translate_checkbox_var, onvalue="1", offvalue="0")
         self.translate_checkbox.pack(side="left", padx=10, pady=5)
-        ttk.Label(self.control_frame, text="Kadr Dore:").pack(side="left", padx=(10,2), pady=5)
-        self.draw_level_menu = OptionMenu(self.control_frame, self.selected_draw_level_name, *self.draw_level_options.keys())
+
+        ttk.Label(self.control_frame_top, text="Kadr Dore:").pack(side="left", padx=(10,2), pady=5)
+        self.draw_level_menu = OptionMenu(self.control_frame_top, self.selected_draw_level_name, *self.draw_level_options.keys())
         self.draw_level_menu.pack(side="left", padx=5, pady=5)
-        self.selected_draw_level_name.trace_add("write", self.on_setting_change)
-        ttk.Label(self.control_frame, text=f"Font Size ({MIN_FONT_SIZE}-{MAX_FONT_SIZE}):").pack(side="left", padx=(10, 2), pady=5)
-        self.font_size_entry = Entry(self.control_frame, textvariable=self.font_size_var, width=5)
+
+        ttk.Label(self.control_frame_top, text=f"Font Size ({MIN_FONT_SIZE}-{MAX_FONT_SIZE}):").pack(side="left", padx=(10, 2), pady=5)
+        self.font_size_entry = Entry(self.control_frame_top, textvariable=self.font_size_var, width=5)
         self.font_size_entry.pack(side="left", padx=5, pady=5)
-        self.font_size_entry.bind("<Return>", self.on_setting_change)
-        self.font_size_entry.bind("<FocusOut>", self.on_setting_change)
-        self.exit_button = Button(self.control_frame, text="Khorooj", command=master.quit)
+
+        self.exit_button = Button(self.control_frame_top, text="Khorooj", command=master.quit)
         self.exit_button.pack(side="right", padx=5, pady=5)
+
+        # ردیف دوم کنترل‌ها
+        ttk.Label(self.control_frame_bottom, text=f"Deghat Kalame ({0}-{100}):").pack(side="left", padx=(0, 2), pady=5)
+        self.word_confidence_entry = Entry(self.control_frame_bottom, textvariable=self.word_confidence_threshold_var, width=5)
+        self.word_confidence_entry.pack(side="left", padx=5, pady=5)
+
+        ttk.Label(self.control_frame_bottom, text="Gaussian Kernel (odd):").pack(side="left", padx=(10, 2), pady=5)
+        self.gaussian_kernel_entry = Entry(self.control_frame_bottom, textvariable=self.gaussian_kernel_var, width=5)
+        self.gaussian_kernel_entry.pack(side="left", padx=5, pady=5)
+
+        ttk.Label(self.control_frame_bottom, text="Adapt. Block (odd, >1):").pack(side="left", padx=(10, 2), pady=5)
+        self.adaptive_block_entry = Entry(self.control_frame_bottom, textvariable=self.adaptive_block_size_var, width=5)
+        self.adaptive_block_entry.pack(side="left", padx=5, pady=5)
+
+        ttk.Label(self.control_frame_bottom, text="Adapt. C:").pack(side="left", padx=(10, 2), pady=5)
+        self.adaptive_c_entry = Entry(self.control_frame_bottom, textvariable=self.adaptive_c_var, width=5)
+        self.adaptive_c_entry.pack(side="left", padx=5, pady=5)
+
+        # دکمه‌های نمایش مراحل پیش‌پردازش
+        ttk.Label(self.control_frame_debug_views, text="Namayesh Marhale Pishpardazesh:").pack(side="left", padx=(0, 5), pady=5)
+        self.show_original_button = Button(self.control_frame_debug_views, text="Asli (RGB)", command=self.show_original_image_debug)
+        self.show_original_button.pack(side="left", padx=2, pady=5)
+        self.show_grayscale_button = Button(self.control_frame_debug_views, text="Khakestari", command=self.show_grayscale_image_debug)
+        self.show_grayscale_button.pack(side="left", padx=2, pady=5)
+        self.show_blurred_button = Button(self.control_frame_debug_views, text="Blur Shodeh", command=self.show_blurred_image_debug)
+        self.show_blurred_button.pack(side="left", padx=2, pady=5)
+        self.show_binary_button = Button(self.control_frame_debug_views, text="Binary (Siah/Sefid)", command=self.show_binary_image_debug)
+        self.show_binary_button.pack(side="left", padx=2, pady=5)
+        self.show_final_annotated_button = Button(self.control_frame_debug_views, text="Nahayi (Ba Tarjomeh)", command=self.show_final_annotated_image_debug)
+        self.show_final_annotated_button.pack(side="left", padx=2, pady=5)
+
 
         self.main_content_frame = ttk.Frame(master, padding="10")
         self.main_content_frame.pack(side="top", fill="both", expand=True)
+        # ... (بقیه UI مثل قبل) ...
         self.main_content_frame.grid_columnconfigure(0, weight=1)
         self.main_content_frame.grid_columnconfigure(1, weight=1)
         self.main_content_frame.grid_rowconfigure(0, weight=1)
@@ -120,11 +174,11 @@ class OCRTranslatorApp:
         self.text_boxes_frame.grid_rowconfigure(0, weight=1)
         self.text_boxes_frame.grid_rowconfigure(1, weight=1)
         self.text_boxes_frame.grid_columnconfigure(0, weight=1)
-        self.ocr_text_frame = ttk.LabelFrame(self.text_boxes_frame, text="Matn Shenasayi Shode", padding="5")
+        self.ocr_text_frame = ttk.LabelFrame(self.text_boxes_frame, text="Matn Shenasayi Shodeh", padding="5")
         self.ocr_text_frame.grid(row=0, column=0, sticky="nsew", pady=(0,2))
         self.ocr_text_widget = scrolledtext.ScrolledText(self.ocr_text_frame, wrap='word', height=10, width=30, font=("tahoma", 9))
         self.ocr_text_widget.pack(fill="both", expand=True)
-        self.translated_text_frame = ttk.LabelFrame(self.text_boxes_frame, text="Matn Tarjome Shode", padding="5")
+        self.translated_text_frame = ttk.LabelFrame(self.text_boxes_frame, text="Matn Tarjome Shodeh", padding="5")
         self.translated_text_frame.grid(row=1, column=0, sticky="nsew", pady=(2,0))
         self.translated_text_widget = scrolledtext.ScrolledText(self.translated_text_frame, wrap='word', height=10, width=30, font=("tahoma", 9))
         self.translated_text_widget.pack(fill="both", expand=True)
@@ -135,52 +189,114 @@ class OCRTranslatorApp:
         self.status_label = Label(self.status_frame, text="Amadeh", fg="white", bg="gray25")
         self.status_label.pack(side="left", padx=10)
 
+        self._last_displayed_annotated_pil = None # برای دکمه نمایش نهایی
 
-    def on_setting_change(self, *args):
+
+    def _display_cv_image_in_label(self, cv_img, conversion_code=None):
+        if cv_img is None:
+            messagebox.showinfo("Etela", "Tasviri baraye namayesh dar in marhale vojood nadarad. Lotfan avval 'Amal va Pardazesh' ra anjam dahid.")
+            return
+        try:
+            if conversion_code is not None:
+                pil_img = Image.fromarray(cv.cvtColor(cv_img, conversion_code))
+            else: # Предполагается, что تصویر تک کاناله است یا قبلا RGB است
+                pil_img = Image.fromarray(cv_img)
+
+            container_width = self.image_container.winfo_width()
+            container_height = self.image_container.winfo_height()
+            resized_pil_image = resize_pil_image_for_tk(pil_img, container_width, container_height)
+            self.update_image_display(resized_pil_image)
+        except Exception as e:
+            print(f"Khata dar namayesh tasvir CV: {e}")
+            messagebox.showerror("Khata", "Moshkeli dar tabdil ya namayesh tasvir pish amad.")
+
+    def show_original_image_debug(self):
+        if self.last_pil_original is None:
+            messagebox.showinfo("Etela", "Lotfan avval yek tasvir entekhab konid va pardazesh konid.")
+            return
+        self.update_image_display(resize_pil_image_for_tk(self.last_pil_original, self.image_container.winfo_width(), self.image_container.winfo_height()))
+        self.status_label.config(text="Namayesh: Tasvir Asli (RGB)")
+
+    def show_grayscale_image_debug(self):
+        self._display_cv_image_in_label(self.img_cv_grayscale_debug)
+        if self.img_cv_grayscale_debug is not None: self.status_label.config(text="Namayesh: Tasvir Khakestari")
+
+    def show_blurred_image_debug(self):
+        self._display_cv_image_in_label(self.img_cv_blurred_debug)
+        if self.img_cv_blurred_debug is not None: self.status_label.config(text="Namayesh: Tasvir Blur Shodeh")
+
+    def show_binary_image_debug(self):
+        self._display_cv_image_in_label(self.img_cv_binary_debug)
+        if self.img_cv_binary_debug is not None: self.status_label.config(text="Namayesh: Tasvir Binary")
+
+    def show_final_annotated_image_debug(self):
+        if self._last_displayed_annotated_pil:
+            self.update_image_display(resize_pil_image_for_tk(self._last_displayed_annotated_pil, self.image_container.winfo_width(), self.image_container.winfo_height()))
+            self.status_label.config(text="Namayesh: Tasvir Nahayi (Ba Tarjomeh)")
+        else:
+            messagebox.showinfo("Etela", "Hanooz tasvir nahayi pardazesh nashode ast.")
+
+
+    def apply_settings_and_process(self):
         if not self.current_image_path:
+            messagebox.showwarning("Hoshdar", "Lotfan avval yek tasvir entekhab konid.")
             self.status_label.config(text="Amadeh")
             return
 
-        current_font_size = self.font_size_var.get()
-        current_language_name = self.selected_language_name.get()
-        current_translate_enabled = self.translate_checkbox_var.get()
-        current_draw_level = self.selected_draw_level_name.get()
+        self.status_label.config(text="Dar hale pardazesh ba tanzimat jadid...")
+        if not self.progress_bar.winfo_ismapped(): self.progress_bar.pack(side="left", padx=5)
+        self.progress_bar.start()
+        # پاک کردن تصاویر میانی قبلی برای نمایش اشکال زدایی
+        self.img_cv_grayscale_debug = None
+        self.img_cv_blurred_debug = None
+        self.img_cv_binary_debug = None
+        self._last_displayed_annotated_pil = None
+        threading.Thread(target=self.process_image, args=(self.current_image_path,), daemon=True).start()
 
-        font_changed_only = (
-            current_font_size != self.prev_font_size and
-            current_language_name == self.prev_language_name and
-            current_translate_enabled == self.prev_translate_enabled and
-            current_draw_level == self.prev_draw_level
-        )
-
-        if font_changed_only and self.last_img_cv_original is not None:
-            self.status_label.config(text="در حال اعمال فونت جدید...")
-            if not self.progress_bar.winfo_ismapped(): self.progress_bar.pack(side="left", padx=5)
-            self.progress_bar.start()
-            threading.Thread(target=self._rerender_image_annotations, daemon=True).start()
-        else:
-            self.status_label.config(text="pardazesh mojadad...")
-            if not self.progress_bar.winfo_ismapped(): self.progress_bar.pack(side="left", padx=5)
-            self.progress_bar.start()
-            threading.Thread(target=self.process_image, args=(self.current_image_path,), daemon=True).start()
 
     def select_image(self):
         file_path = filedialog.askopenfilename(title="Entekhab Tasvir", filetypes=[("Image Files", "*.png *.jpg *.jpeg")])
         if file_path:
             self.current_image_path = file_path
-            self.last_img_cv_original = None # ریست کردن داده‌های قبلی
-            self.last_pil_original = None
-            self.last_df_ocr_processed = None
-            self.last_render_segments = []
-            self.status_label.config(text="Dar hale pardazesh ...")
-            if not self.progress_bar.winfo_ismapped(): self.progress_bar.pack(side="left", padx=5)
-            self.progress_bar.start()
-            threading.Thread(target=self.process_image, args=(file_path,), daemon=True).start()
+            try:
+                # بارگذاری اولیه برای نمایش و ذخیره نسخه‌های اصلی
+                self.last_pil_original, self.last_img_cv_original = self._load_images_from_path(file_path)
+
+                # پاک کردن نتایج پردازش قبلی
+                self.last_df_ocr_processed = None
+                self.last_render_segments = []
+                self.ocr_text_widget.config(state='normal'); self.ocr_text_widget.delete('1.0', 'end'); self.ocr_text_widget.config(state='disabled')
+                self.translated_text_widget.config(state='normal'); self.translated_text_widget.delete('1.0', 'end'); self.translated_text_widget.config(state='disabled')
+
+                # پاک کردن تصاویر میانی اشکال زدایی
+                self.img_cv_grayscale_debug = None
+                self.img_cv_blurred_debug = None
+                self.img_cv_binary_debug = None
+                self._last_displayed_annotated_pil = None
+
+                self.status_label.config(text="Tasvir entekhab shod. Baraye pardazesh dokmeye 'Amal va Pardazesh' ra bezanid.")
+
+                # نمایش فوری تصویر اصلی
+                container_width = self.image_container.winfo_width()
+                container_height = self.image_container.winfo_height()
+                resized_pil_image = resize_pil_image_for_tk(self.last_pil_original, container_width, container_height)
+                self.master.after(0, self.update_image_display, resized_pil_image)
+
+            except Exception as e:
+                print(f"Khata dar bargozari ya namayesh avaliye tasvir: {e}")
+                messagebox.showerror("Khata", f"Moshkeli dar bargozari tasvir pish amad: {e}")
+                self.current_image_path = None
+                self.last_pil_original = None
+                self.last_img_cv_original = None
+                self.status_label.config(text="Khata dar bargozari tasvir.")
+            finally:
+                if self.progress_bar.winfo_ismapped(): self.progress_bar.stop(); self.progress_bar.pack_forget()
+
 
     def _load_current_font(self):
         try:
             font_size_str = self.font_size_var.get()
-            if not font_size_str.isdigit(): raise ValueError("اندازه فونت باید عدد باشد.")
+            if not font_size_str.isdigit(): raise ValueError("Andazeye font bayad adad bashad.")
             font_size = int(font_size_str)
             if not (MIN_FONT_SIZE <= font_size <= MAX_FONT_SIZE):
                 font_size = GLOBAL_FONT_DEFAULT_SIZE
@@ -188,7 +304,8 @@ class OCRTranslatorApp:
             if FONT_PATH and global_font_instance_check:
                 return ImageFont.truetype(FONT_PATH, font_size)
             return None
-        except ValueError:
+        except ValueError as ve:
+            messagebox.showerror("Khataye Voroodi", str(ve))
             self.font_size_var.set(str(GLOBAL_FONT_DEFAULT_SIZE))
             if FONT_PATH and global_font_instance_check:
                 try: return ImageFont.truetype(FONT_PATH, GLOBAL_FONT_DEFAULT_SIZE)
@@ -197,97 +314,155 @@ class OCRTranslatorApp:
         except Exception: return None
 
     def _load_images_from_path(self, img_path):
+        # این تابع حالا هم PIL و هم CV اصلی را برمی‌گرداند
         try:
-            img_pil = Image.open(img_path) # استفاده از Image به جای pl.Image
+            img_pil = Image.open(img_path)
             if img_pil.mode == 'RGBA' or img_pil.mode == 'P': img_pil = img_pil.convert('RGB')
             img_cv = cv.cvtColor(np.array(img_pil), cv.COLOR_RGB2BGR)
-            if img_cv is None: raise ValueError("تبدیل تصویر PIL به OpenCV ناموفق بود.")
-            return img_pil, img_cv
-        except FileNotFoundError: raise ValueError(f"فایل تصویر '{img_path}' یافت نشد.")
-        except Exception as e: raise ValueError(f"خطا در بارگذاری تصویر '{img_path}': {e}")
+            if img_cv is None: raise ValueError("Tabdil tasvir PIL be OpenCV namovafagh bood.")
+            return img_pil, img_cv # برگرداندن هر دو فرمت
+        except FileNotFoundError: raise ValueError(f"File tasvir '{img_path}' yaft nashod.")
+        except Exception as e: raise ValueError(f"Khata dar bargozari tasvir '{img_path}': {e}")
 
-    def _rerender_image_annotations(self): # دیگر آرگومان فونت سایز نمی‌گیرد، از self.font_size_var می‌خواند
-        """فقط کادرها و متون را با استفاده از داده‌های قبلی و فونت جدید بازترسیمی می‌کند."""
+
+    def process_image(self, img_path_should_be_self_current): # از self.current_image_path و self.last_img_cv_original استفاده می‌کند
         try:
-            self.status_label.config(text="اعمال فونت جدید...")
-            new_font = self._load_current_font()
-            if new_font is None and global_font_instance_check :
-                new_font = global_font_instance_check
-
-            if self.last_img_cv_original is None or not self.last_render_segments:
-                print("DEBUG: داده‌های قبلی برای بازترسیمی موجود نیست (در _rerender).")
-                self.master.after(0, self.stop_loading_and_update_status)
+            if self.last_img_cv_original is None: # باید قبلا در select_image بارگذاری شده باشد
+                # این حالت نباید رخ دهد اگر select_image درست کار کند
+                self.master.after(0, lambda: messagebox.showerror("Khata", "Tasvir asli baraye pardazesh vojood nadarad."))
                 return
 
-            image_to_annotate_cv = self.last_img_cv_original.copy()
-
-            for segment in self.last_render_segments:
-                rect = segment.get('rect')
-                text_on_image = segment.get('text_on_image', "")
-                should_draw_text = segment.get('draw_text', False)
-                box_color = segment.get('color', (255,0,0))
-
-                if rect:
-                    x, y, w, h = rect
-                    cv.rectangle(image_to_annotate_cv, (x, y), (x + w, y + h), box_color, 2)
-
-                if should_draw_text and text_on_image.strip() and new_font:
-                    # مختصات x و y برای draw_text_on_cv_image، مختصات بالای کادر است
-                    image_to_annotate_cv = draw_text_on_cv_image(
-                        image_to_annotate_cv, text_on_image,
-                        x, y, new_font # ارسال x و y کادر
-                    )
-
-            final_image_pil = Image.fromarray(cv.cvtColor(image_to_annotate_cv, cv.COLOR_BGR2RGB))
-            container_width = self.image_container.winfo_width()
-            container_height = self.image_container.winfo_height()
-            resized_pil_image = resize_pil_image_for_tk(final_image_pil, container_width, container_height)
-
-            self.master.after(0, self.update_image_display, resized_pil_image)
-            self.prev_font_size = self.font_size_var.get()
-
-        except Exception as e:
-            print(f"خطا در بازترسیمی با فونت جدید: {e}")
-            traceback.print_exc()
-            self.master.after(0, lambda: messagebox.showerror("خطا", "خطا در اعمال فونت جدید."))
-        finally:
-            self.master.after(0, self.stop_loading_and_update_status)
-
-    def process_image(self, img_path):
-        try:
             current_font_for_drawing = self._load_current_font()
-            if current_font_for_drawing is None:
-                print("هشدار جدی: فونت برای نوشتن روی تصویر بارگذاری نشد.")
+            if current_font_for_drawing is None and global_font_instance_check :
+                 current_font_for_drawing = ImageFont.truetype(FONT_PATH, GLOBAL_FONT_DEFAULT_SIZE)
+            elif current_font_for_drawing is None:
+                print("Hoshdar: Font baraye neveshtan rooye tasvir bargozari nashod.")
 
-            img_pil_original, img_cv_original = self._load_images_from_path(img_path)
-            img_cv_for_preprocessing = img_cv_original.copy()
-            preprocessed_cv_image = preprocess_image_for_ocr(img_cv_for_preprocessing) # از ocr_utils
+            # خواندن مقادیر پیش‌پردازش از UI
+            try:
+                g_kernel = int(self.gaussian_kernel_var.get())
+                if g_kernel < 1 : g_kernel = 1
+                elif g_kernel % 2 == 0: g_kernel +=1
+            except ValueError:
+                g_kernel = GAUSSIAN_BLUR_KERNEL_SIZE_DEFAULT
+                self.master.after(0, lambda: self.gaussian_kernel_var.set(str(g_kernel)))
 
-            ocr_input_for_df = preprocessed_cv_image if preprocessed_cv_image is not None else img_cv_original
-            df_ocr_processed = get_structured_ocr_data(ocr_input_for_df, # از ocr_utils
+            try:
+                a_block = int(self.adaptive_block_size_var.get())
+                if a_block <= 1 : a_block = 3
+                elif a_block % 2 == 0: a_block += 1
+            except ValueError:
+                a_block = ADAPTIVE_THRESHOLD_BLOCK_SIZE_DEFAULT
+                self.master.after(0, lambda: self.adaptive_block_size_var.set(str(a_block)))
+
+            try:
+                a_c = int(self.adaptive_c_var.get())
+            except ValueError:
+                a_c = ADAPTIVE_THRESHOLD_C_DEFAULT
+                self.master.after(0, lambda: self.adaptive_c_var.set(str(a_c)))
+
+            try:
+                word_confidence_threshold = int(self.word_confidence_threshold_var.get())
+                if not (0 <= word_confidence_threshold <= 100):
+                    raise ValueError("Deghat kalame bayad beyn 0 va 100 bashad.")
+            except ValueError as ve:
+                self.master.after(0, lambda: messagebox.showerror("Khataye Voroodi", str(ve)))
+                word_confidence_threshold = WORD_CONFIDENCE_THRESHOLD_DEFAULT
+                self.master.after(0, lambda: self.word_confidence_threshold_var.set(str(WORD_CONFIDENCE_THRESHOLD_DEFAULT)))
+
+            # --- شروع مراحل پیش‌پردازش و ذخیره برای Debug ---
+            img_cv_to_process = self.last_img_cv_original.copy()
+
+            # مرحله 1: خاکستری (اگر تصویر رنگی است)
+            if len(img_cv_to_process.shape) == 3 and img_cv_to_process.shape[2] == 3:
+                self._current_cv_grayscale = cv.cvtColor(img_cv_to_process, cv.COLOR_BGR2GRAY)
+            else: # اگر از قبل خاکستری است
+                self._current_cv_grayscale = img_cv_to_process.copy() # یا خود تصویر اگر تغییرناپذیری مهم نیست
+            self.img_cv_grayscale_debug = self._current_cv_grayscale.copy()
+
+
+            # مرحله 2: بلور
+            self._current_cv_blurred = cv.GaussianBlur(self._current_cv_grayscale, (g_kernel, g_kernel), 0)
+            self.img_cv_blurred_debug = self._current_cv_blurred.copy()
+
+            # مرحله 3: باینری (آستانه‌گیری تطبیقی)
+            self._current_cv_binary = cv.adaptiveThreshold(self._current_cv_blurred, 255,
+                                                         cv.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                                         cv.THRESH_BINARY_INV,
+                                                         a_block, a_c)
+            self.img_cv_binary_debug = self._current_cv_binary.copy()
+
+            # تصویر نهایی برای OCR، تصویر باینری است
+            ocr_input_for_df = self._current_cv_binary
+            # --- پایان مراحل پیش‌پردازش ---
+
+
+            df_ocr_processed = get_structured_ocr_data(ocr_input_for_df,
                                                        lang=DEFAULT_OCR_LANG,
                                                        psm_config=DEFAULT_OCR_PSM_CONFIG)
 
-            ocr_display_text = extract_ocr_text_for_display(df_ocr_processed) # از ocr_utils
+            ocr_display_text = extract_ocr_text_for_display(df_ocr_processed)
             self.master.after(0, self.update_ocr_text_widget, ocr_display_text)
 
-            # --- آماده سازی برای ترجمه و رندر ---
             list_of_segments_for_rendering = []
-            translated_output_for_widget = ocr_display_text # پیش‌فرض اگر ترجمه خاموش باشد
+            translated_output_for_widget = ocr_display_text
 
             should_translate = self.translate_checkbox_var.get() == "1"
             current_target_lang_code = self.language_options[self.selected_language_name.get()]
             selected_level_name = self.selected_draw_level_name.get()
             level_to_draw = self.draw_level_options.get(selected_level_name, 0)
 
-            image_with_annotations_cv = img_cv_original.copy()
+            image_with_annotations_cv = self.last_img_cv_original.copy()
+
+            # نمایش تصویر با کلمات OCR شده حین ترجمه (اگر فعال باشد و کاربر کادر خواسته باشد)
+            # (این بخش کمی تکراری با منطق اصلی رندر است، اما برای فیدبک سریع حین ترجمه است)
+            if should_translate and current_target_lang_code != 'en' and level_to_draw > 0 :
+                temp_image_for_ocr_display = self.last_img_cv_original.copy() # استفاده از تصویر اصلی برای نمایش موقت
+                ocr_box_color = (0,255,255) # Yellow
+
+                if level_to_draw == 5: # Word
+                    words_for_ocr_display = df_ocr_processed[(df_ocr_processed['level'] == 5) & (df_ocr_processed['conf'] > word_confidence_threshold)].copy()
+                    for _, word_row in words_for_ocr_display.iterrows():
+                        original_word = str(word_row['text']).strip()
+                        if not original_word or not (int(word_row['width']) > 0 and int(word_row['height']) > 0): continue
+                        x,y,w,h = int(word_row['left']),int(word_row['top']),int(word_row['width']),int(word_row['height'])
+                        cv.rectangle(temp_image_for_ocr_display, (x, y), (x + w, y + h), ocr_box_color, 1)
+                        if current_font_for_drawing and original_word.strip():
+                            temp_image_for_ocr_display = draw_text_on_cv_image(
+                                temp_image_for_ocr_display, original_word, x, y, current_font_for_drawing, padding_above_box=1, text_color=(50,50,50) # رنگ متن متفاوت برای تشخیص
+                            )
+                elif level_to_draw == 4: # Line
+                    df_words_seg = df_ocr_processed[df_ocr_processed['level'] == 5].copy()
+                    if not df_words_seg.empty:
+                        man_lines_data = manually_segment_lines(df_words_seg, DEFAULT_Y_TOLERANCE_FACTOR_MANUAL_LINES)
+                        for line_series in man_lines_data:
+                            if not line_series: continue
+                            min_x = min(int(s['left']) for s in line_series)
+                            min_y = min(int(s['top']) for s in line_series)
+                            max_x_c = max(int(s['left']) + int(s['width']) for s in line_series)
+                            max_y_c = max(int(s['top']) + int(s['height']) for s in line_series)
+                            line_text_orig = " ".join(str(s['text']).strip() for s in line_series if str(s['text']).strip())
+                            cv.rectangle(temp_image_for_ocr_display, (min_x, min_y), (max_x_c, max_y_c), ocr_box_color, 2)
+                            if current_font_for_drawing and line_text_orig.strip():
+                                temp_image_for_ocr_display = draw_text_on_cv_image(
+                                    temp_image_for_ocr_display, line_text_orig, min_x, min_y, current_font_for_drawing, text_color=(50,50,50)
+                                )
+
+                final_image_to_show_pil_ocr = Image.fromarray(cv.cvtColor(temp_image_for_ocr_display, cv.COLOR_BGR2RGB))
+                container_width = self.image_container.winfo_width()
+                container_height = self.image_container.winfo_height()
+                resized_pil_image_ocr = resize_pil_image_for_tk(final_image_to_show_pil_ocr, container_width, container_height)
+                self.master.after(0, self.update_image_display, resized_pil_image_ocr)
+                self.master.after(0, lambda: self.status_label.config(text="Darkhast tarjome..."))
+
 
             # --- منطق اصلی برای کادکشی، ترجمه، و آماده‌سازی list_of_segments_for_rendering ---
-            if level_to_draw == 4: # حالت "Khat/Jomle (Line)" (تقسیم‌بندی دستی)
+            # (این بخش تقریبا بدون تغییر از پاسخ قبلی است، فقط اطمینان حاصل شود که از word_confidence_threshold درست استفاده می‌کند)
+            if level_to_draw == 4: # Khat (Line)
                 df_words_for_segmentation = df_ocr_processed[df_ocr_processed['level'] == 5].copy()
                 temp_translated_list_for_textbox = []
                 if not df_words_for_segmentation.empty:
-                    manually_segmented_lines_data = manually_segment_lines( # از ocr_utils
+                    manually_segmented_lines_data = manually_segment_lines(
                         df_words_for_segmentation,
                         y_tolerance_factor=DEFAULT_Y_TOLERANCE_FACTOR_MANUAL_LINES
                     )
@@ -301,7 +476,7 @@ class OCRTranslatorApp:
                         if max_x_coord <= min_x or max_y_coord <= min_y: continue
 
                         current_rect = (min_x, min_y, max_x_coord - min_x, max_y_coord - min_y)
-                        current_box_color = (34,139,34)
+                        current_box_color = (34,139,34) # Green for lines
                         cv.rectangle(image_with_annotations_cv, (min_x, min_y), (max_x_coord, max_y_coord), current_box_color, 2)
 
                         line_text_original = " ".join(str(s['text']).strip() for s in line_of_word_series if str(s['text']).strip())
@@ -315,30 +490,26 @@ class OCRTranslatorApp:
                                 current_segment_for_textbox = translated_line
 
                             if current_font_for_drawing and text_to_show_on_image.strip():
-                                image_with_annotations_cv = draw_text_on_cv_image( # از drawing_utils
+                                image_with_annotations_cv = draw_text_on_cv_image(
                                     image_with_annotations_cv, text_to_show_on_image,
                                     min_x, min_y, current_font_for_drawing
                                 )
-
                         list_of_segments_for_rendering.append({
                             'rect': current_rect, 'text_on_image': text_to_show_on_image,
                             'draw_text': True, 'color': current_box_color,
-                            # ذخیره مختصات اصلی برای _rerender_image_annotations
                             'base_x': min_x, 'base_y_box_top': min_y
                         })
                         temp_translated_list_for_textbox.append(current_segment_for_textbox)
                     if temp_translated_list_for_textbox : translated_output_for_widget = "\n".join(temp_translated_list_for_textbox)
 
-                # اگر در حالت خط دستی، خطی پیدا نشد یا کلمه‌ای برای تقسیم‌بندی نبود
-                # و ترجمه فعال است، کل متن OCR شده را ترجمه کن
                 if not temp_translated_list_for_textbox and should_translate and current_target_lang_code != 'en':
                     if ocr_display_text.strip(): translated_output_for_widget = translate_en_to_fa_api(ocr_display_text, target_lang=current_target_lang_code)
-                    elif not translated_output_for_widget: translated_output_for_widget = "[متنی برای ترجمه یافت نشد]"
+                    elif not translated_output_for_widget: translated_output_for_widget = "[Matni baraye tarjome yaft nashod]"
 
-            elif level_to_draw == 5: # حالت "Kalame (Word)"
-                words_to_process = df_ocr_processed[(df_ocr_processed['level'] == 5) & (df_ocr_processed['conf'] > WORD_CONFIDENCE_THRESHOLD)].copy()
+            elif level_to_draw == 5: # Kalame (Word)
+                words_to_process = df_ocr_processed[(df_ocr_processed['level'] == 5) & (df_ocr_processed['conf'] > word_confidence_threshold)].copy()
                 temp_textbox_lines_dict = {}
-                current_box_color = (0,0,255)
+                current_box_color = (0,0,255) # Blue for words
 
                 for _, word_row in words_to_process.iterrows():
                     original_word = str(word_row['text']).strip()
@@ -353,7 +524,6 @@ class OCRTranslatorApp:
 
                     if should_translate and current_target_lang_code != 'en':
                         translated_word = translate_en_to_fa_api(original_word, target_lang=current_target_lang_code)
-                        # اگر ترجمه خالی بود یا فقط فاصله بود، از اصلی استفاده کن
                         text_to_show_on_image = translated_word if translated_word and translated_word.strip() else original_word
                         current_word_for_textbox = translated_word if translated_word and translated_word.strip() else original_word
 
@@ -362,13 +532,11 @@ class OCRTranslatorApp:
                             image_with_annotations_cv, text_to_show_on_image,
                             x, y, current_font_for_drawing, padding_above_box=1
                         )
-
                     list_of_segments_for_rendering.append({
                         'rect': current_rect, 'text_on_image': text_to_show_on_image,
                         'draw_text': True, 'color': current_box_color,
                         'base_x': x, 'base_y_box_top': y
                     })
-
                     line_key = (word_row['page_num'], word_row['block_num'], word_row['par_num'], word_row['line_num'])
                     if line_key not in temp_textbox_lines_dict: temp_textbox_lines_dict[line_key] = []
                     temp_textbox_lines_dict[line_key].append({'word_num': int(word_row['word_num']), 'text': current_word_for_textbox})
@@ -377,8 +545,8 @@ class OCRTranslatorApp:
                 final_textbox_lines = [" ".join(item['text'] for item in sorted(temp_textbox_lines_dict[key], key=lambda i: i['word_num'])) for key in sorted_line_keys]
                 translated_output_for_widget = "\n".join(final_textbox_lines)
 
-            else: # سایر سطوح (پاراگراف، بلوک) یا عدم کادکشی (level_to_draw == 0 یا 2 یا 3)
-                if level_to_draw > 0 and not df_ocr_processed.empty: # فقط کادرها
+            else: # سایر سطوح یا عدم کادکشی
+                if level_to_draw > 0 and not df_ocr_processed.empty:
                     elements_to_draw = df_ocr_processed[df_ocr_processed['level'] == level_to_draw]
                     color_map = {3: (255,165,0), 2: (128,0,128)}
                     current_box_color = color_map.get(level_to_draw, (200,200,200))
@@ -392,66 +560,58 @@ class OCRTranslatorApp:
                                 'draw_text': False, 'color': current_box_color,
                                 'base_x': x, 'base_y_box_top': y
                             })
-
-                # منطق متن برای جعبه پایینی در این حالت‌ها
                 if should_translate and current_target_lang_code != 'en':
                     if ocr_display_text.strip(): translated_output_for_widget = translate_en_to_fa_api(ocr_display_text, target_lang=current_target_lang_code)
-                    else: translated_output_for_widget = "[متنی برای ترجمه وجود ندارد]"
-                # اگر ترجمه خاموش است، translated_output_for_widget از قبل ocr_display_text است.
+                    else: translated_output_for_widget = "[Matni baraye tarjome vojud nadarad]"
 
-            # اگر پس از تمام بررسی‌ها، translated_output_for_widget هنوز مقدار پیش‌فرض (ocr_display_text) را دارد
-            # و ترجمه باید انجام می‌شد اما هیچ شرط خاصی آن را پر نکرد، اینجا کل متن را ترجمه می‌کنیم.
-            # این حالت بیشتر برای level_to_draw == 0 (عدم کادکشی) یا سطوح 2 و 3 است.
             if translated_output_for_widget == ocr_display_text and should_translate and current_target_lang_code != 'en':
                  if ocr_display_text.strip():
                      translated_output_for_widget = translate_en_to_fa_api(ocr_display_text, target_lang=current_target_lang_code)
                  else:
-                     translated_output_for_widget = "[متنی برای ترجمه نبود]"
-
+                     translated_output_for_widget = "[Matni baraye tarjome nabood]"
 
             self.master.after(0, self.update_translated_text_widget, translated_output_for_widget.strip())
 
             final_image_to_show_pil = Image.fromarray(cv.cvtColor(image_with_annotations_cv, cv.COLOR_BGR2RGB))
+            self._last_displayed_annotated_pil = final_image_to_show_pil.copy() # ذخیره برای دکمه نمایش نهایی
 
             container_width = self.image_container.winfo_width()
             container_height = self.image_container.winfo_height()
             resized_pil_image = resize_pil_image_for_tk(final_image_to_show_pil, container_width, container_height)
 
-            self.master.after(0, self.update_image_display, resized_pil_image)
+            self.master.after(0, self.update_image_display, resized_pil_image) # نمایش تصویر نهایی با کادر و ترجمه
 
-            # --- ذخیره نتایج و تنظیمات فعلی ---
-            self.last_img_cv_original = img_cv_original.copy()
-            self.last_pil_original = img_pil_original.copy()
             self.last_df_ocr_processed = df_ocr_processed.copy() if df_ocr_processed is not None and not df_ocr_processed.empty else None
             self.last_render_segments = list_of_segments_for_rendering
             self.last_ocr_display_text = ocr_display_text
             self.last_translated_output_for_widget = translated_output_for_widget
 
-            self.prev_font_size = self.font_size_var.get()
-            self.prev_language_name = self.selected_language_name.get()
-            self.prev_translate_enabled = self.translate_checkbox_var.get()
-            self.prev_draw_level = self.selected_draw_level_name.get()
-
         except ValueError as ve:
-            print(f"ValueError در process_image: {ve}")
-            self.master.after(0, lambda: messagebox.showerror("خطای ورودی/مقدار", f"{ve}"))
+            print(f"ValueError dar process_image: {ve}")
+            self.master.after(0, lambda: messagebox.showerror("Khataye Voroodi/Meghdar", f"{ve}"))
         except pytesseract.TesseractError as tess_err:
-            print(f"TesseractError در process_image: {tess_err}")
-            self.master.after(0, lambda: messagebox.showerror("خطای Tesseract", f"{tess_err}"))
+            print(f"TesseractError dar process_image: {tess_err}")
+            self.master.after(0, lambda: messagebox.showerror("Khataye Tesseract", f"{tess_err}"))
         except Exception as e:
-            print(f"خطای عمومی در process_image: {e}")
+            print(f"Khataye Omoomi dar process_image: {e}")
             traceback.print_exc()
-            self.master.after(0, lambda: messagebox.showerror("خطای کلی در پردازش", f"یک خطای پیش‌بینی نشده رخ داد: {e}"))
+            self.master.after(0, lambda: messagebox.showerror("Khataye Kolli dar Pardazesh", f"Yek khataye pishbini nashode rokh dad: {e}"))
         finally:
             self.master.after(0, self.stop_loading_and_update_status)
 
+
     def update_image_display(self, img_pil):
+        if img_pil is None:
+            # ممکن است بخواهید یک تصویر پیش‌فرض یا خالی نمایش دهید
+            # self.image_label.config(image=None)
+            # self.image_label.image = None
+            return
         try:
             self.translated_image_tk = ImageTk.PhotoImage(image=img_pil)
             self.image_label.config(image=self.translated_image_tk)
             self.image_label.image = self.translated_image_tk
         except Exception as e:
-            print(f"خطا در به‌روزرسانی نمایش تصویر: {e}")
+            print(f"Khata dar beresresani namayesh tasvir: {e}")
             traceback.print_exc()
 
     def update_ocr_text_widget(self, text):
@@ -469,7 +629,13 @@ class OCRTranslatorApp:
     def stop_loading_and_update_status(self):
         self.progress_bar.stop()
         self.progress_bar.pack_forget()
-        self.status_label.config(text="Amadeh")
+        if not self.current_image_path: # اگر هیچ تصویری انتخاب نشده
+             self.status_label.config(text="Amadeh")
+        elif self.img_cv_binary_debug is None: # اگر تصویر انتخاب شده اما هنوز پردازش نشده
+            self.status_label.config(text="Tasvir entekhab shod. Baraye pardazesh dokmeye 'Amal va Pardazesh' ra bezanid.")
+        else: # اگر پردازش انجام شده
+            self.status_label.config(text="Pardazesh tamam shod. Amadeh baraye namayesh marhale ya pardazesh mojadad.")
+
 
 if __name__ == "__main__":
     root = Tk()
